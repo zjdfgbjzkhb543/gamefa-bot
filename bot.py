@@ -298,7 +298,7 @@ class Database:
         
         return backup_path
     
-    ydef clean_old_records(self, days: int = None):
+    def clean_old_records(self, days: int = None):
     if days is None:
         days = int(self.get_setting('cache_days') or CACHE_DAYS)
     
