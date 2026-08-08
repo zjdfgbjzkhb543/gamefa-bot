@@ -1,1 +1,4 @@
-aiogram>=3.20,<4
+python-telegram-bot==20.7
+python-dotenv==1.0.0
+textdistance==4.6.0
+persiantools==4.1.0
