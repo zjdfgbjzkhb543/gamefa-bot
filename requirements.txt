@@ -1,2 +1,0 @@
-python-telegram-bot>=21,<23
-openai>=1.100.0
