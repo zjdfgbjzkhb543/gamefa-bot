@@ -1,653 +1,411 @@
-import logging
-import sqlite3
+import os
 import re
+import sqlite3
 import hashlib
+import logging
 from datetime import datetime, timedelta
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-import textdistance
-
-
-# =========================================================
+# =========================
 # تنظیمات
-# =========================================================
+# =========================
 
-BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
-
-# آیدی عددی ادمین‌ها
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [
-    123456789,
+    int(x.strip())
+    for x in os.getenv("ADMIN_IDS", "").split(",")
+    if x.strip()
 ]
 
-DATABASE_FILE = "news.db"
+DATABASE = "news.db"
 
-# حداقل درصد شباهت برای تشخیص خبر مشابه
-SIMILARITY_THRESHOLD = 0.75
-
-# فقط اخبار 24 ساعت اخیر نگهداری می‌شوند
+# فقط اخبار 24 ساعت اخیر بررسی می‌شوند
 KEEP_HOURS = 24
 
-# حداکثر تعداد خبر برای مقایسه
-MAX_NEWS_TO_CHECK = 100
-
-
-# =========================================================
-# لاگ
-# =========================================================
+# درصد شباهت برای تشخیص خبر مشابه
+SIMILARITY_THRESHOLD = 0.75
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.INFO
 )
 
 logger = logging.getLogger(__name__)
 
 
-# =========================================================
+# =========================
+# بررسی تنظیمات
+# =========================
+
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN در Variables تنظیم نشده است."
+    )
+
+if not ADMIN_IDS:
+    raise RuntimeError(
+        "ADMIN_IDS در Variables تنظیم نشده است."
+    )
+
+
+# =========================
 # دیتابیس
-# =========================================================
+# =========================
 
-class Database:
+def init_database():
+    conn = sqlite3.connect(DATABASE)
 
-    def __init__(self, filename):
-        self.filename = filename
-        self.init_database()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT NOT NULL,
+            text_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
-    def connect(self):
-        return sqlite3.connect(self.filename)
+    conn.commit()
+    conn.close()
 
-    def init_database(self):
-
-        with self.connect() as conn:
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS news (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text TEXT NOT NULL,
-                    text_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-            """)
-
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_created_at
-                ON news(created_at)
-            """)
-
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_text_hash
-                ON news(text_hash)
-            """)
-
-    def cleanup_old_news(self):
-
-        cutoff = datetime.utcnow() - timedelta(hours=KEEP_HOURS)
-
-        with self.connect() as conn:
-
-            conn.execute(
-                """
-                DELETE FROM news
-                WHERE created_at < ?
-                """,
-                (cutoff.isoformat(),)
-            )
-
-            conn.commit()
-
-    def add_news(self, text):
-
-        text_hash = hashlib.sha256(
-            text.encode("utf-8")
-        ).hexdigest()
-
-        created_at = datetime.utcnow().isoformat()
-
-        with self.connect() as conn:
-
-            cursor = conn.execute(
-                """
-                INSERT INTO news
-                (text, text_hash, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    text,
-                    text_hash,
-                    created_at,
-                )
-            )
-
-            conn.commit()
-
-            return cursor.lastrowid
-
-    def get_recent_news(self):
-
-        cutoff = datetime.utcnow() - timedelta(hours=KEEP_HOURS)
-
-        with self.connect() as conn:
-
-            cursor = conn.execute(
-                """
-                SELECT id, text, created_at
-                FROM news
-                WHERE created_at >= ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (
-                    cutoff.isoformat(),
-                    MAX_NEWS_TO_CHECK,
-                )
-            )
-
-            return cursor.fetchall()
-
-    def exists_exact(self, text_hash):
-
-        with self.connect() as conn:
-
-            cursor = conn.execute(
-                """
-                SELECT id, text, created_at
-                FROM news
-                WHERE text_hash = ?
-                LIMIT 1
-                """,
-                (text_hash,)
-            )
-
-            return cursor.fetchone()
-
-
-# =========================================================
-# نرمال‌سازی متن فارسی
-# =========================================================
 
 def normalize_text(text):
-
-    if not text:
-        return ""
-
-    text = text.strip().lower()
-
-    # یکسان‌سازی حروف عربی و فارسی
-    replacements = {
-        "ي": "ی",
-        "ى": "ی",
-        "ك": "ک",
-        "ۀ": "ه",
-        "ة": "ه",
-        "ؤ": "و",
-        "إ": "ا",
-        "أ": "ا",
-        "ٱ": "ا",
-    }
-
-    for old, new in replacements.items():
-        text = text.replace(old, new)
+    text = text.lower()
 
     # تبدیل اعداد انگلیسی به فارسی
-    english_digits = "0123456789"
-    persian_digits = "۰۱۲۳۴۵۶۷۸۹"
-
-    translation_table = str.maketrans(
-        english_digits,
-        persian_digits
+    translation = str.maketrans(
+        "0123456789",
+        "۰۱۲۳۴۵۶۷۸۹"
     )
-
-    text = text.translate(translation_table)
+    text = text.translate(translation)
 
     # حذف لینک
-    text = re.sub(
-        r"https?://\S+|www\.\S+",
-        " ",
-        text
+    text = re.sub(r"https?://\S+", " ", text)
+
+    # حذف کاراکترهای اضافی
+    text = re.sub(r"[^\w\s\u0600-\u06FF]", " ", text)
+
+    # حذف فاصله‌های اضافه
+    text = " ".join(text.split())
+
+    return text
+
+
+def text_hash(text):
+    normalized = normalize_text(text)
+
+    return hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+
+def cleanup_old_news():
+    conn = sqlite3.connect(DATABASE)
+
+    cutoff = datetime.now() - timedelta(hours=KEEP_HOURS)
+
+    conn.execute(
+        """
+        DELETE FROM news
+        WHERE created_at < ?
+        """,
+        (cutoff,)
     )
 
-    # حذف منشن
-    text = re.sub(
-        r"@\w+",
-        " ",
-        text
-    )
-
-    # حذف هشتگ از ابتدای کلمه
-    text = re.sub(
-        r"#",
-        " ",
-        text
-    )
-
-    # حذف ایموجی‌ها و علائم اضافی
-    text = re.sub(
-        r"[^\w\s\u0600-\u06FF]",
-        " ",
-        text
-    )
-
-    # حذف فاصله‌های اضافی
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    return text.strip()
+    conn.commit()
+    conn.close()
 
 
-# =========================================================
-# کلمات بی‌اهمیت
-# =========================================================
+# =========================
+# تشخیص شباهت
+# =========================
 
-STOPWORDS = {
-    "و",
-    "در",
-    "به",
-    "از",
-    "با",
-    "برای",
-    "که",
-    "این",
-    "آن",
-    "را",
-    "است",
-    "شد",
-    "شده",
-    "می",
-    "شود",
-    "خواهد",
-    "یک",
-    "اما",
-    "اگر",
-    "یا",
-    "نیز",
-    "هم",
-    "بر",
-    "تا",
-    "پس",
-    "روی",
-    "درباره",
-    "کرد",
-    "کرده",
-    "کند",
-    "کنند",
-    "هست",
-    "هستند",
-    "بود",
-    "بودند",
-    "ای",
-    "های",
-    "ها",
-}
-
-
-# =========================================================
-# استخراج کلمات مهم
-# =========================================================
-
-def get_keywords(text):
-
-    text = normalize_text(text)
-
-    words = text.split()
-
-    keywords = []
-
-    for word in words:
-
-        if len(word) < 3:
-            continue
-
-        if word in STOPWORDS:
-            continue
-
-        keywords.append(word)
-
-    return set(keywords)
-
-
-# =========================================================
-# محاسبه شباهت
-# =========================================================
-
-def calculate_similarity(text1, text2):
-
+def similarity(text1, text2):
     text1 = normalize_text(text1)
     text2 = normalize_text(text2)
 
-    if not text1 or not text2:
-        return 0.0
+    words1 = set(text1.split())
+    words2 = set(text2.split())
 
-    # -----------------------------------------------------
-    # شباهت کلمات
-    # -----------------------------------------------------
+    if not words1 or not words2:
+        return 0
 
-    words1 = get_keywords(text1)
-    words2 = get_keywords(text2)
+    intersection = words1.intersection(words2)
+    union = words1.union(words2)
 
-    if words1 and words2:
+    return len(intersection) / len(union)
 
-        intersection = len(words1 & words2)
-        union = len(words1 | words2)
 
-        jaccard = intersection / union if union else 0
+def find_duplicate(text):
+    cleanup_old_news()
 
-    else:
-        jaccard = 0
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
 
-    # -----------------------------------------------------
-    # شباهت متنی
-    # -----------------------------------------------------
+    cutoff = datetime.now() - timedelta(hours=KEEP_HOURS)
 
-    levenshtein = textdistance.levenshtein.normalized_similarity(
-        text1,
-        text2
+    cursor.execute(
+        """
+        SELECT id, text, created_at
+        FROM news
+        WHERE created_at >= ?
+        ORDER BY created_at DESC
+        """,
+        (cutoff,)
     )
 
-    # -----------------------------------------------------
-    # ترکیب
-    # -----------------------------------------------------
+    rows = cursor.fetchall()
 
-    similarity = (
-        (jaccard * 0.65) +
-        (levenshtein * 0.35)
+    conn.close()
+
+    current_hash = text_hash(text)
+
+    for news_id, old_text, created_at in rows:
+
+        # بررسی دقیق
+        if text_hash(old_text) == current_hash:
+            return {
+                "duplicate": True,
+                "score": 1.0,
+                "id": news_id,
+                "text": old_text,
+                "created_at": created_at
+            }
+
+        # بررسی شباهت
+        score = similarity(text, old_text)
+
+        if score >= SIMILARITY_THRESHOLD:
+            return {
+                "duplicate": True,
+                "score": score,
+                "id": news_id,
+                "text": old_text,
+                "created_at": created_at
+            }
+
+    return {
+        "duplicate": False
+    }
+
+
+def save_news(text):
+    conn = sqlite3.connect(DATABASE)
+
+    conn.execute(
+        """
+        INSERT INTO news (text, text_hash)
+        VALUES (?, ?)
+        """,
+        (
+            text,
+            text_hash(text)
+        )
     )
 
-    return min(1.0, max(0.0, similarity))
+    conn.commit()
+    conn.close()
 
 
-# =========================================================
-# دیتابیس
-# =========================================================
-
-db = Database(DATABASE_FILE)
-
-
-# =========================================================
+# =========================
 # بررسی ادمین
-# =========================================================
+# =========================
 
 def is_admin(user_id):
-
     return user_id in ADMIN_IDS
 
 
-# =========================================================
+# =========================
 # /start
-# =========================================================
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text(
-            "⛔ شما اجازه استفاده از این ربات را ندارید."
+            "⛔ شما دسترسی استفاده از این ربات را ندارید."
         )
-
         return
 
     await update.message.reply_text(
         "🤖 ربات تشخیص اخبار گیمفا فعال است.\n\n"
-        "خبر را برای من ارسال کن تا بررسی کنم.\n\n"
-        "🟢 خبر جدید → ثبت می‌شود\n"
-        "🟡 خبر مشابه → درصد شباهت نمایش داده می‌شود\n"
-        "🔴 خبر تکراری → اعلام می‌شود\n\n"
-        "📆 فقط اخبار ۲۴ ساعت اخیر بررسی می‌شوند."
+        "خبر را برای من ارسال کن تا بررسی کنم که "
+        "در ۲۴ ساعت اخیر تکراری بوده یا نه.\n\n"
+        "🟢 خبر جدید\n"
+        "🔴 خبر تکراری"
     )
 
 
-# =========================================================
+# =========================
 # /help
-# =========================================================
+# =========================
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         return
 
     await update.message.reply_text(
-        "📚 راهنمای ربات\n\n"
-        "خبر را مستقیماً برای ربات بفرست.\n\n"
-        "🟢 خبر جدید:\n"
-        "خبر قبلاً در ۲۴ ساعت اخیر ثبت نشده.\n\n"
-        "🟡 خبر مشابه:\n"
-        "خبر مشابهی در ۲۴ ساعت اخیر پیدا شده.\n\n"
-        "🔴 خبر تکراری:\n"
-        "متن خبر تقریباً یکسان است.\n\n"
-        "/stats - آمار ربات\n"
-        "/cleanup - پاکسازی دستی\n"
-        "/help - راهنما"
+        "راهنمای ربات:\n\n"
+        "خبر را مستقیماً برای ربات ارسال کن.\n\n"
+        "🟢 اگر مشابه خبری در ۲۴ ساعت اخیر نباشد:\n"
+        "خبر جدید اعلام می‌شود.\n\n"
+        "🔴 اگر مشابه باشد:\n"
+        "خبر تکراری اعلام می‌شود.\n\n"
+        "🗑️ اخبار قدیمی‌تر از ۲۴ ساعت به صورت خودکار حذف می‌شوند."
     )
 
 
-# =========================================================
-# /stats
-# =========================================================
+# =========================
+# دریافت خبر
+# =========================
 
-async def stats(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
     if not is_admin(user_id):
-        return
-
-    db.cleanup_old_news()
-
-    news = db.get_recent_news()
-
-    await update.message.reply_text(
-        f"📊 آمار ربات\n\n"
-        f"📰 اخبار ذخیره‌شده در ۲۴ ساعت اخیر: {len(news)}\n"
-        f"🎯 آستانه شباهت: {SIMILARITY_THRESHOLD * 100:.0f}%\n"
-        f"📆 مدت نگهداری: {KEEP_HOURS} ساعت"
-    )
-
-
-# =========================================================
-# /cleanup
-# =========================================================
-
-async def cleanup(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-        return
-
-    db.cleanup_old_news()
-
-    await update.message.reply_text(
-        "🧹 اخبار قدیمی پاک شدند.\n"
-        "📆 فقط اخبار ۲۴ ساعت اخیر نگه داشته می‌شوند."
-    )
-
-
-# =========================================================
-# پردازش خبر
-# =========================================================
-
-async def process_news(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id):
-
         await update.message.reply_text(
-            "⛔ شما اجازه ارسال خبر ندارید."
+            "⛔ شما دسترسی ندارید."
         )
-
         return
-
-    # -----------------------------------------------------
-    # دریافت متن
-    # -----------------------------------------------------
 
     text = update.message.text
 
     if not text:
-
         await update.message.reply_text(
-            "❌ متن خبر پیدا نشد."
+            "❌ فقط پیام متنی ارسال کن."
         )
-
         return
 
     text = text.strip()
 
     if len(text) < 10:
-
         await update.message.reply_text(
             "❌ متن خبر خیلی کوتاه است."
         )
-
         return
 
-    # -----------------------------------------------------
     # پاک کردن اخبار قدیمی
-    # -----------------------------------------------------
+    cleanup_old_news()
 
-    db.cleanup_old_news()
+    result = find_duplicate(text)
 
-    # -----------------------------------------------------
-    # نرمال‌سازی
-    # -----------------------------------------------------
+    if result["duplicate"]:
 
-    normalized = normalize_text(text)
+        score = result["score"] * 100
 
-    if not normalized:
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "❌ تکراری",
+                    callback_data="duplicate"
+                ),
+                InlineKeyboardButton(
+                    "✅ خبر جدید",
+                    callback_data="new"
+                )
+            ]
+        ])
 
         await update.message.reply_text(
-            "❌ متن قابل بررسی نیست."
+            "🔴 خبر مشابه پیدا شد!\n\n"
+            f"📊 میزان شباهت: {score:.1f}%\n"
+            f"🆔 خبر قبلی: {result['id']}\n"
+            f"📅 تاریخ: {result['created_at']}\n\n"
+            "متن خبر قبلی:\n"
+            f"{result['text'][:500]}",
+            reply_markup=keyboard
         )
 
         return
 
-    # -----------------------------------------------------
-    # بررسی هش دقیق
-    # -----------------------------------------------------
-
-    text_hash = hashlib.sha256(
-        normalized.encode("utf-8")
-    ).hexdigest()
-
-    exact_match = db.exists_exact(text_hash)
-
-    if exact_match:
-
-        await update.message.reply_text(
-            "🔴 خبر تکراری است!\n\n"
-            f"📊 شباهت: 100%\n"
-            f"🆔 خبر قبلی: {exact_match[0]}\n"
-            f"📅 ثبت شده: {exact_match[2][:19]}"
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # بررسی شباهت
-    # -----------------------------------------------------
-
-    previous_news = db.get_recent_news()
-
-    best_similarity = 0
-    best_news = None
-
-    for news_id, old_text, created_at in previous_news:
-
-        similarity = calculate_similarity(
-            normalized,
-            old_text
-        )
-
-        if similarity > best_similarity:
-
-            best_similarity = similarity
-            best_news = (
-                news_id,
-                old_text,
-                created_at
-            )
-
-    # -----------------------------------------------------
-    # خبر مشابه
-    # -----------------------------------------------------
-
-    if best_news and best_similarity >= SIMILARITY_THRESHOLD:
-
-        similarity_percent = best_similarity * 100
-
-        await update.message.reply_text(
-            "🟡 خبر مشابه پیدا شد!\n\n"
-            f"📊 میزان شباهت: {similarity_percent:.1f}%\n"
-            f"🆔 خبر قبلی: {best_news[0]}\n"
-            f"📅 تاریخ: {best_news[2][:19]}\n\n"
-            "⚠️ قبل از انتشار بررسی کن که خبر تکراری نباشد."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # خبر جدید
-    # -----------------------------------------------------
-
-    news_id = db.add_news(normalized)
+    # ذخیره خبر جدید
+    save_news(text)
 
     await update.message.reply_text(
         "🟢 خبر جدید است!\n\n"
-        f"🆔 شناسه: {news_id}\n"
-        f"📊 بیشترین شباهت: {best_similarity * 100:.1f}%\n"
-        "📆 محدوده بررسی: ۲۴ ساعت اخیر\n\n"
-        "✅ می‌توانی خبر را منتشر کنی."
+        "این خبر در ۲۴ ساعت اخیر مشابهی نداشته است."
     )
 
 
-# =========================================================
+# =========================
+# دکمه‌ها
+# =========================
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+
+    if not is_admin(query.from_user.id):
+        await query.answer(
+            "⛔ دسترسی ندارید.",
+            show_alert=True
+        )
+        return
+
+    await query.answer()
+
+    if query.data == "duplicate":
+
+        await query.edit_message_text(
+            "🔴 این خبر به عنوان «تکراری» علامت‌گذاری شد."
+        )
+
+    elif query.data == "new":
+
+        await query.edit_message_text(
+            "🟢 این خبر به عنوان «خبر جدید» تایید شد."
+        )
+
+
+# =========================
+# /stats
+# =========================
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    cleanup_old_news()
+
+    conn = sqlite3.connect(DATABASE)
+
+    cursor = conn.execute(
+        "SELECT COUNT(*) FROM news"
+    )
+
+    count = cursor.fetchone()[0]
+
+    conn.close()
+
+    await update.message.reply_text(
+        "📊 آمار ربات\n\n"
+        f"📰 اخبار ذخیره‌شده: {count}\n"
+        f"⏱ بازه بررسی: {KEEP_HOURS} ساعت\n"
+        f"🎯 آستانه شباهت: {SIMILARITY_THRESHOLD * 100:.0f}%"
+    )
+
+
+# =========================
 # اجرای ربات
-# =========================================================
+# =========================
 
 def main():
 
-    if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
+    logger.info("Starting Gamefa News Bot...")
 
-        print(
-            "❌ ابتدا BOT_TOKEN را در bot.py وارد کنید."
-        )
-
-        return
-
-    if not ADMIN_IDS:
-
-        print(
-            "❌ حداقل یک ADMIN_ID وارد کنید."
-        )
-
-        return
+    init_database()
+    cleanup_old_news()
 
     application = (
         Application.builder()
@@ -655,7 +413,6 @@ def main():
         .build()
     )
 
-    # دستورات
     application.add_handler(
         CommandHandler("start", start)
     )
@@ -669,22 +426,20 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler("cleanup", cleanup)
+        CallbackQueryHandler(button_callback)
     )
 
-    # دریافت خبر
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            process_news
+            handle_message
         )
     )
 
-    print("================================")
-    print("🤖 Gamfa News Checker")
-    print("🚀 Bot started")
-    print("================================")
+    logger.info("Bot is running...")
 
+    # مهم:
+    # اینجا نباید asyncio.run یا await استفاده شود.
     application.run_polling(
         drop_pending_updates=True
     )
