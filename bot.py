@@ -1,7 +1,8 @@
 import asyncio
+import csv
+import io
 import json
 import logging
-import math
 import os
 import re
 from datetime import datetime, timezone
@@ -21,12 +22,16 @@ from openai import AsyncOpenAI
 
 
 # ============================================================
-# GAMEFA AI BOT V2
+# GAMEFA AI BOT V2 + ARCHIVE IMPORT
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_API_KEY = os.getenv(
+    "OPENAI_API_KEY",
+    ""
+).strip()
+
 OPENAI_MODEL = os.getenv(
     "OPENAI_MODEL",
     "gpt-4.1-mini"
@@ -38,17 +43,24 @@ EMBEDDING_MODEL = os.getenv(
 ).strip()
 
 DATA_DIR = Path(
-    os.getenv("DATA_DIR", "/data")
+    os.getenv(
+        "DATA_DIR",
+        "/data"
+    )
 )
 
 MAX_NEWS = 1000
 
-# ------------------------------------------------------------
+# ============================================================
 # ADMIN IDS
-# ------------------------------------------------------------
+# ============================================================
 
 def get_admin_ids():
-    raw = os.getenv("ADMIN_IDS", "")
+    raw = os.getenv(
+        "ADMIN_IDS",
+        ""
+    )
+
     result = set()
 
     for item in raw.split(","):
@@ -63,12 +75,15 @@ def get_admin_ids():
 ADMIN_IDS = get_admin_ids()
 
 PRIMARY_ADMIN_ID = int(
-    os.getenv("PRIMARY_ADMIN_ID", "0") or 0
+    os.getenv(
+        "PRIMARY_ADMIN_ID",
+        "0"
+    ) or 0
 )
 
-# ------------------------------------------------------------
+# ============================================================
 # FILES
-# ------------------------------------------------------------
+# ============================================================
 
 try:
     DATA_DIR.mkdir(
@@ -82,14 +97,13 @@ except Exception:
         exist_ok=True
     )
 
-
 NEWS_FILE = DATA_DIR / "news.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
 
-# ------------------------------------------------------------
+# ============================================================
 # LOGGING
-# ------------------------------------------------------------
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,15 +113,14 @@ logging.basicConfig(
 logger = logging.getLogger("gamefa")
 
 
-# ------------------------------------------------------------
+# ============================================================
 # BOT
-# ------------------------------------------------------------
+# ============================================================
 
 if not BOT_TOKEN:
     raise RuntimeError(
         "BOT_TOKEN environment variable is missing."
     )
-
 
 bot = Bot(
     token=BOT_TOKEN
@@ -120,26 +133,27 @@ router = Router()
 dp.include_router(router)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # OPENAI
-# ------------------------------------------------------------
+# ============================================================
 
 ai: Optional[AsyncOpenAI] = None
 
 if OPENAI_API_KEY:
-
     ai = AsyncOpenAI(
         api_key=OPENAI_API_KEY
     )
 
 
-# ------------------------------------------------------------
-# TEMP DATA
-# ------------------------------------------------------------
+# ============================================================
+# TEMP STORAGE
+# ============================================================
 
 PENDING = {}
 
 AWAITING = {}
+
+IMPORT_SESSIONS = {}
 
 
 # ============================================================
@@ -228,9 +242,11 @@ def load_settings():
             ADMIN_IDS
         ),
 
-        "primary_admin": PRIMARY_ADMIN_ID,
+        "primary_admin":
+            PRIMARY_ADMIN_ID,
 
-        "similarity_threshold": 0.72,
+        "similarity_threshold":
+            0.72,
 
         "channel_id": ""
 
@@ -320,22 +336,17 @@ def normalize(text):
     if not text:
         return ""
 
-    text = text.lower()
+    text = str(text).lower()
 
     replacements = {
 
         "ي": "ی",
-
         "ى": "ی",
-
         "ك": "ک",
-
         "ۀ": "ه",
 
         "\u200c": " ",
-
         "\u200f": " ",
-
         "\u200e": " "
 
     }
@@ -384,7 +395,6 @@ def lexical_similarity(
 ):
 
     first = normalize(first)
-
     second = normalize(second)
 
     if not first or not second:
@@ -429,7 +439,7 @@ def lexical_similarity(
 
 
 # ============================================================
-# COSINE
+# COSINE SIMILARITY
 # ============================================================
 
 def cosine_similarity(
@@ -443,19 +453,15 @@ def cosine_similarity(
     if len(first) != len(second):
         return 0.0
 
-    first_length = math.sqrt(
-        sum(
-            value * value
-            for value in first
-        )
-    )
+    first_length = sum(
+        value * value
+        for value in first
+    ) ** 0.5
 
-    second_length = math.sqrt(
-        sum(
-            value * value
-            for value in second
-        )
-    )
+    second_length = sum(
+        value * value
+        for value in second
+    ) ** 0.5
 
     if not first_length or not second_length:
         return 0.0
@@ -599,7 +605,7 @@ async def ask_ai_json(
 
 
 # ============================================================
-# NEWS ANALYSIS
+# AI NEWS ANALYSIS
 # ============================================================
 
 ANALYSIS_PROMPT = """
@@ -626,7 +632,7 @@ ANALYSIS_PROMPT = """
 "reason":""
 }
 
-category باید یکی از این‌ها باشد:
+category یکی از:
 
 بازی
 فیلم و سریال
@@ -634,7 +640,7 @@ category باید یکی از این‌ها باشد:
 هوش مصنوعی
 سایر
 
-source_type:
+source_type یکی از:
 
 رسمی
 گزارش رسانه‌ای
@@ -642,7 +648,7 @@ source_type:
 تأییدنشده
 نامشخص
 
-importance:
+importance یکی از:
 
 کم
 متوسط
@@ -663,7 +669,7 @@ async def analyze_news(text):
 
 
 # ============================================================
-# GAMEFA REWRITE
+# REWRITE
 # ============================================================
 
 async def rewrite_news(text):
@@ -678,17 +684,13 @@ async def rewrite_news(text):
 
 هیچ اطلاعات جدیدی اضافه نکن.
 
-خروجی فقط JSON:
+فقط JSON:
 
 {
 "title":"",
 "body":"",
 "hashtags":[]
 }
-
-عنوان کوتاه و خبری باشد.
-
-متن خبر حرفه‌ای و قابل انتشار باشد.
 
 """
 
@@ -712,7 +714,7 @@ async def generate_title(text):
 "title":""
 }
 
-برای این خبر یک تیتر خبری فارسی
+برای این خبر یک تیتر خبری فارسی،
 کوتاه، جذاب و دقیق بساز.
 
 """
@@ -774,205 +776,1353 @@ async def generate_hashtags(text):
 
 
 # ============================================================
-# COMPARE
+# ARCHIVE IMPORT
 # ============================================================
 
-async def compare_news(
-    new_news,
-    old_news
-):
+def clean_import_text(text):
 
-    prompt = """
+    if not text:
+        return ""
 
-دو خبر را مقایسه کن.
+    text = str(text)
 
-تمرکز روی:
-
-- رویداد اصلی
-- بازی/فیلم
-- شخصیت‌ها
-- شرکت‌ها
-- ادعای اصلی
-- تاریخ
-- جزئیات مهم
-
-فقط JSON:
-
-{
-"same_event":true,
-"score":0,
-"reason":"",
-"differences":[]
-}
-
-score بین 0 تا 100.
-
-"""
-
-    user_prompt = (
-
-        "خبر جدید:\n"
-        + new_news
-        + "\n\n"
-        + "خبر قبلی:\n"
-        + old_news
-
+    text = text.replace(
+        "\r\n",
+        "\n"
     )
 
-    return await ask_ai_json(
-        prompt,
-        user_prompt
+    text = text.replace(
+        "\r",
+        "\n"
     )
 
-
-# ============================================================
-# WHY DUPLICATE
-# ============================================================
-
-async def explain_duplicate(
-    new_news,
-    old_news
-):
-
-    prompt = """
-
-توضیح بده چرا این دو خبر مشابه هستند.
-
-فقط JSON:
-
-{
-"reason":"",
-"shared_entities":[],
-"shared_event":"",
-"important_difference":""
-}
-
-"""
-
-    user_prompt = (
-
-        "خبر جدید:\n"
-        + new_news
-        + "\n\n"
-        + "خبر قبلی:\n"
-        + old_news
-
+    # حذف فاصله‌های غیرضروری
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
     )
 
-    return await ask_ai_json(
-        prompt,
-        user_prompt
+    # حذف خطوط کاملاً خالی ابتدا و انتها
+    text = text.strip()
+
+    return text
+
+
+def extract_news_from_txt(text):
+
+    text = clean_import_text(
+        text
     )
 
-
-# ============================================================
-# FIND SIMILAR NEWS
-# ============================================================
-
-async def find_similar_news(text):
-
-    news = load_news()
-
-    if not news:
+    if not text:
         return []
 
-    candidates = []
+    # --------------------------------------------------------
+    # حالت ۱:
+    # هر خبر با خط خالی جدا شده
+    # --------------------------------------------------------
 
-    # مرحله اول:
-    # بررسی سریع متنی
+    blocks = re.split(
+        r"\n\s*\n+",
+        text
+    )
+
+    blocks = [
+        clean_import_text(block)
+        for block in blocks
+        if clean_import_text(block)
+    ]
+
+    # --------------------------------------------------------
+    # اگر فایل فقط یک متن بزرگ بود،
+    # آن را به خطوط تبدیل نمی‌کنیم.
+    # --------------------------------------------------------
+
+    if len(blocks) == 1:
+
+        lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+        ]
+
+        # اگر تعداد خطوط زیاد باشد،
+        # هر خط را خبر در نظر می‌گیریم.
+        if len(lines) >= 10:
+
+            return lines
+
+    return blocks
+
+
+def extract_news_from_json(data):
+
+    results = []
+
+    # --------------------------------------------------------
+    # لیست ساده
+    # --------------------------------------------------------
+
+    if isinstance(data, list):
+
+        for item in data:
+
+            if isinstance(
+                item,
+                str
+            ):
+
+                text = clean_import_text(
+                    item
+                )
+
+                if text:
+                    results.append(text)
+
+            elif isinstance(
+                item,
+                dict
+            ):
+
+                text = extract_text_from_dict(
+                    item
+                )
+
+                if text:
+                    results.append(text)
+
+        return results
+
+    # --------------------------------------------------------
+    # دیکشنری
+    # --------------------------------------------------------
+
+    if isinstance(data, dict):
+
+        # آرشیوهای رایج
+        for key in (
+            "messages",
+            "news",
+            "items",
+            "posts",
+            "data",
+            "results"
+        ):
+
+            value = data.get(
+                key
+            )
+
+            if isinstance(
+                value,
+                list
+            ):
+
+                return extract_news_from_json(
+                    value
+                )
+
+        # اگر خود دیکشنری یک خبر باشد
+        text = extract_text_from_dict(
+            data
+        )
+
+        if text:
+            results.append(text)
+
+    return results
+
+
+def extract_text_from_dict(item):
+
+    if not isinstance(
+        item,
+        dict
+    ):
+        return ""
+
+    # اولویت متن کامل خبر
+    possible_keys = [
+
+        "text",
+        "body",
+        "content",
+        "message",
+        "caption",
+        "description",
+        "news"
+
+    ]
+
+    for key in possible_keys:
+
+        value = item.get(
+            key
+        )
+
+        # Telegram JSON ممکن است
+        # text را به صورت list داشته باشد.
+        if isinstance(
+            value,
+            list
+        ):
+
+            parts = []
+
+            for part in value:
+
+                if isinstance(
+                    part,
+                    str
+                ):
+
+                    parts.append(
+                        part
+                    )
+
+                elif isinstance(
+                    part,
+                    dict
+                ):
+
+                    inner = part.get(
+                        "text",
+                        ""
+                    )
+
+                    if inner:
+                        parts.append(
+                            str(inner)
+                        )
+
+            value = "".join(
+                parts
+            )
+
+        if isinstance(
+            value,
+            str
+        ):
+
+            value = clean_import_text(
+                value
+            )
+
+            if value:
+                return value
+
+    # اگر متن پیدا نشد، title + summary
+    title = str(
+        item.get(
+            "title",
+            ""
+        )
+    ).strip()
+
+    summary = str(
+        item.get(
+            "summary",
+            ""
+        )
+    ).strip()
+
+    if title or summary:
+
+        return clean_import_text(
+
+            title
+            + "\n\n"
+            + summary
+
+        )
+
+    return ""
+
+
+def extract_news_from_csv(text):
+
+    results = []
+
+    stream = io.StringIO(
+        text
+    )
+
+    try:
+
+        reader = csv.DictReader(
+            stream
+        )
+
+        for row in reader:
+
+            item = dict(row)
+
+            value = extract_text_from_dict(
+                item
+            )
+
+            if value:
+                results.append(
+                    value
+                )
+
+    except Exception:
+
+        logger.exception(
+            "CSV parsing failed"
+        )
+
+    return results
+
+
+def parse_archive_file(
+    filename,
+    raw_bytes
+):
+
+    extension = Path(
+        filename
+    ).suffix.lower()
+
+    # --------------------------------------------------------
+    # JSON
+    # --------------------------------------------------------
+
+    if extension == ".json":
+
+        text = raw_bytes.decode(
+            "utf-8-sig",
+            errors="ignore"
+        )
+
+        data = json.loads(
+            text
+        )
+
+        return extract_news_from_json(
+            data
+        )
+
+    # --------------------------------------------------------
+    # CSV
+    # --------------------------------------------------------
+
+    if extension == ".csv":
+
+        text = raw_bytes.decode(
+            "utf-8-sig",
+            errors="ignore"
+        )
+
+        return extract_news_from_csv(
+            text
+        )
+
+    # --------------------------------------------------------
+    # TXT
+    # --------------------------------------------------------
+
+    if extension in (
+        ".txt",
+        ".text",
+        ""
+    ):
+
+        text = raw_bytes.decode(
+            "utf-8-sig",
+            errors="ignore"
+        )
+
+        return extract_news_from_txt(
+            text
+        )
+
+    raise ValueError(
+        "فرمت فایل پشتیبانی نمی‌شود."
+    )
+
+
+def next_news_id(news):
+
+    ids = []
 
     for item in news:
 
-        similarity = lexical_similarity(
+        value = item.get(
+            "id"
+        )
 
-            text,
+        if isinstance(
+            value,
+            int
+        ):
 
+            ids.append(
+                value
+            )
+
+    return max(
+        ids or [0]
+    ) + 1
+
+
+async def prepare_import_news(
+    texts,
+    user_id
+):
+
+    current_news = load_news()
+
+    existing_normalized = {
+        normalize(
             item.get(
                 "text",
                 ""
             )
+        )
+        for item in current_news
+    }
 
+    # حذف موارد خالی و تکراری داخل خود فایل
+    unique_texts = []
+
+    seen = set()
+
+    for text in texts:
+
+        text = clean_import_text(
+            text
         )
 
-        if similarity >= 0.18:
+        if not text:
+            continue
 
-            candidates.append(
-                (
-                    similarity,
-                    item
+        normalized = normalize(
+            text
+        )
+
+        if not normalized:
+            continue
+
+        if normalized in seen:
+            continue
+
+        seen.add(
+            normalized
+        )
+
+        unique_texts.append(
+            text
+        )
+
+    new_texts = []
+
+    duplicate_count = 0
+
+    for text in unique_texts:
+
+        normalized = normalize(
+            text
+        )
+
+        if normalized in existing_normalized:
+
+            duplicate_count += 1
+
+            continue
+
+        new_texts.append(
+            text
+        )
+
+    return (
+        current_news,
+        new_texts,
+        duplicate_count
+    )
+
+
+async def build_import_items(
+    texts,
+    current_news
+):
+
+    items = []
+
+    current_id = next_news_id(
+        current_news
+    )
+
+    total = len(texts)
+
+    for number, text in enumerate(
+        texts,
+        start=1
+    ):
+
+        logger.info(
+            "Importing archive %s/%s",
+            number,
+            total
+        )
+
+        analysis = None
+        embedding = None
+
+        # ----------------------------------------------------
+        # AI
+        # ----------------------------------------------------
+
+        if ai:
+
+            analysis = await analyze_news(
+                text
+            )
+
+            embedding = await create_embedding(
+                text
+            )
+
+        # ----------------------------------------------------
+        # TITLE
+        # ----------------------------------------------------
+
+        if analysis:
+
+            title = (
+                analysis.get(
+                    "title"
                 )
-            )
-
-    candidates.sort(
-        key=lambda x: x[0],
-        reverse=True
-    )
-
-    candidates = candidates[:40]
-
-    # مرحله دوم:
-    # Embedding
-
-    embedding = await create_embedding(
-        text
-    )
-
-    results = []
-
-    for lexical, item in candidates:
-
-        semantic = 0.0
-
-        if (
-            embedding and
-            item.get("embedding")
-        ):
-
-            semantic = cosine_similarity(
-
-                embedding,
-
-                item["embedding"]
-
-            )
-
-        if embedding and item.get(
-            "embedding"
-        ):
-
-            final_score = (
-
-                0.75 * semantic +
-                0.25 * lexical
-
+                or
+                text.splitlines()[0][:300]
             )
 
         else:
 
-            final_score = lexical
+            title = (
+                text.splitlines()[0][:300]
+                if text.splitlines()
+                else
+                "بدون عنوان"
+            )
 
-        results.append({
+        item = {
 
-            "score": final_score,
+            "id": current_id,
 
-            "lexical": lexical,
+            "title": title,
 
-            "semantic": semantic,
+            "text": text,
 
-            "news": item
+            "url": "",
 
-        })
+            "category": (
+                analysis.get(
+                    "category"
+                )
+                if analysis
+                else None
+            ),
 
-    results.sort(
-        key=lambda x: x["score"],
-        reverse=True
+            "subject": (
+                analysis.get(
+                    "subject"
+                )
+                if analysis
+                else None
+            ),
+
+            "event": (
+                analysis.get(
+                    "event"
+                )
+                if analysis
+                else None
+            ),
+
+            "analysis": analysis,
+
+            "embedding": embedding,
+
+            "added_by": user_id,
+
+            "created_at":
+                datetime.now(
+                    timezone.utc
+                ).isoformat(),
+
+            "imported": True
+
+        }
+
+        items.append(
+            item
+        )
+
+        current_id += 1
+
+        # برای جلوگیری از فشار شدید روی API
+        if ai:
+            await asyncio.sleep(
+                0.15
+            )
+
+    return items
+
+
+def archive_import_keyboard():
+
+    return InlineKeyboardMarkup(
+
+        inline_keyboard=[
+
+            [
+
+                InlineKeyboardButton(
+                    text="❌ لغو",
+                    callback_data="archive_cancel"
+                )
+
+            ]
+
+        ]
+
     )
 
-    return results[:5]
+
+def archive_confirm_keyboard():
+
+    return InlineKeyboardMarkup(
+
+        inline_keyboard=[
+
+            [
+
+                InlineKeyboardButton(
+                    text="✅ شروع ورود",
+                    callback_data="archive_confirm"
+                ),
+
+                InlineKeyboardButton(
+                    text="❌ لغو",
+                    callback_data="archive_cancel"
+                )
+
+            ]
+
+        ]
+
+    )
 
 
 # ============================================================
-# KEYBOARDS
+# ARCHIVE MENU
+# ============================================================
+
+def archive_keyboard():
+
+    return InlineKeyboardMarkup(
+
+        inline_keyboard=[
+
+            [
+
+                InlineKeyboardButton(
+                    text="📥 ورود آرشیو",
+                    callback_data="archive_import"
+                )
+
+            ],
+
+            [
+
+                InlineKeyboardButton(
+                    text="📊 آمار آرشیو",
+                    callback_data="menu_stats"
+                )
+
+            ],
+
+            [
+
+                InlineKeyboardButton(
+                    text="🔙 بازگشت",
+                    callback_data="main_menu"
+                )
+
+            ]
+
+        ]
+
+    )
+
+
+@router.callback_query(
+    F.data == "menu_archive"
+)
+async def archive_menu(
+    callback
+):
+
+    if not is_admin(
+        callback.from_user.id
+    ):
+        return
+
+    news = load_news()
+
+    await callback.message.edit_text(
+
+        "📚 مدیریت آرشیو گیمفا\n\n"
+
+        f"تعداد اخبار فعلی: "
+        f"{len(news)}/{MAX_NEWS}\n\n"
+
+        "از این قسمت می‌توانی آرشیو "
+        "قبلی را وارد کنی.",
+
+        reply_markup=archive_keyboard()
+
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# START ARCHIVE IMPORT
+# ============================================================
+
+@router.callback_query(
+    F.data == "archive_import"
+)
+async def archive_import_start(
+    callback
+):
+
+    if not is_primary_admin(
+        callback.from_user.id
+    ):
+
+        await callback.answer(
+            "⛔ فقط ادمین اصلی می‌تواند آرشیو وارد کند.",
+            show_alert=True
+        )
+
+        return
+
+    IMPORT_SESSIONS[
+        callback.from_user.id
+    ] = {
+
+        "status": "waiting_file"
+
+    }
+
+    await callback.message.answer(
+
+        "📥 ورود آرشیو گیمفا\n\n"
+
+        "فایل آرشیو را همینجا برای ربات "
+        "ارسال کن.\n\n"
+
+        "فرمت‌های پشتیبانی‌شده:\n"
+        "• TXT\n"
+        "• JSON\n"
+        "• CSV\n\n"
+
+        "💡 برای فایل TXT بهتر است هر خبر "
+        "با یک خط خالی از خبر بعدی جدا شده باشد.\n\n"
+
+        "⚠️ ربات حداکثر ۱۰۰۰ خبر را نگه می‌دارد.\n"
+        "خبرهای تکراری وارد نمی‌شوند.",
+
+        reply_markup=archive_import_keyboard()
+
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# ARCHIVE CANCEL
+# ============================================================
+
+@router.callback_query(
+    F.data == "archive_cancel"
+)
+async def archive_cancel(
+    callback
+):
+
+    IMPORT_SESSIONS.pop(
+        callback.from_user.id,
+        None
+    )
+
+    await callback.message.answer(
+        "❌ ورود آرشیو لغو شد."
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# RECEIVE ARCHIVE FILE
+# ============================================================
+
+@router.message(
+    F.document
+)
+async def archive_document_handler(
+    message: Message
+):
+
+    if not message.from_user:
+        return
+
+    user_id = (
+        message.from_user.id
+    )
+
+    if not is_primary_admin(
+        user_id
+    ):
+        return
+
+    session = IMPORT_SESSIONS.get(
+        user_id
+    )
+
+    if not session:
+        return
+
+    document = message.document
+
+    if not document:
+        return
+
+    filename = (
+        document.file_name
+        or
+        "archive.txt"
+    )
+
+    extension = Path(
+        filename
+    ).suffix.lower()
+
+    if extension not in (
+        ".txt",
+        ".json",
+        ".csv"
+    ):
+
+        await message.answer(
+
+            "❌ فرمت فایل پشتیبانی نمی‌شود.\n\n"
+            "فقط TXT، JSON و CSV قابل قبول هستند."
+
+        )
+
+        return
+
+    # محدودیت منطقی برای فایل
+    # حدود 25MB
+    if document.file_size:
+
+        if document.file_size > 25 * 1024 * 1024:
+
+            await message.answer(
+
+                "❌ حجم فایل بیشتر از ۲۵ مگابایت است."
+
+            )
+
+            return
+
+    IMPORT_SESSIONS[
+        user_id
+    ] = {
+
+        "status": "downloading",
+
+        "filename": filename
+
+    }
+
+    status_message = await message.answer(
+        "📥 در حال دریافت فایل..."
+    )
+
+    try:
+
+        file = await bot.get_file(
+            document.file_id
+        )
+
+        buffer = io.BytesIO()
+
+        await bot.download_file(
+            file.file_path,
+            buffer
+        )
+
+        raw_bytes = buffer.getvalue()
+
+        await status_message.edit_text(
+            "🔍 فایل دریافت شد؛ در حال استخراج خبرها..."
+        )
+
+        texts = parse_archive_file(
+            filename,
+            raw_bytes
+        )
+
+        if not texts:
+
+            IMPORT_SESSIONS.pop(
+                user_id,
+                None
+            )
+
+            await status_message.edit_text(
+
+                "❌ هیچ خبری از فایل استخراج نشد.\n\n"
+
+                "اگر TXT می‌فرستی، بهتر است "
+                "هر خبر با یک خط خالی جدا شده باشد."
+
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # حذف تکراری‌ها
+        # ----------------------------------------------------
+
+        current_news, new_texts, duplicate_count = (
+            await prepare_import_news(
+                texts,
+                user_id
+            )
+        )
+
+        if not new_texts:
+
+            IMPORT_SESSIONS.pop(
+                user_id,
+                None
+            )
+
+            await status_message.edit_text(
+
+                "⚠️ هیچ خبر جدیدی پیدا نشد.\n\n"
+
+                f"📄 تعداد خبرهای فایل: "
+                f"{len(texts)}\n"
+
+                f"🔁 تکراری: "
+                f"{duplicate_count}"
+
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # محدودیت ۱۰۰۰ خبر
+        # ----------------------------------------------------
+
+        available_slots = max(
+            0,
+            MAX_NEWS - len(current_news)
+        )
+
+        # اگر آرشیو پر باشد، خبرهای قدیمی حذف می‌شوند
+        # تا خبرهای واردشده جدیدتر باقی بمانند.
+
+        will_import = new_texts
+
+        # ----------------------------------------------------
+        # Confirmation
+        # ----------------------------------------------------
+
+        IMPORT_SESSIONS[
+            user_id
+        ] = {
+
+            "status": "confirmation",
+
+            "texts": will_import,
+
+            "current_news": current_news,
+
+            "filename": filename,
+
+            "duplicate_count":
+                duplicate_count
+
+        }
+
+        await status_message.edit_text(
+
+            "📦 آرشیو آماده ورود است.\n\n"
+
+            f"📄 خبرهای استخراج‌شده: "
+            f"{len(texts)}\n"
+
+            f"🆕 خبرهای جدید: "
+            f"{len(will_import)}\n"
+
+            f"🔁 تکراری‌ها: "
+            f"{duplicate_count}\n\n"
+
+            f"📚 آرشیو فعلی: "
+            f"{len(current_news)}/{MAX_NEWS}\n\n"
+
+            "⚠️ با تأیید، خبرهای جدید وارد آرشیو "
+            "می‌شوند و در صورت عبور از ظرفیت ۱۰۰۰، "
+            "قدیمی‌ترین خبرها حذف خواهند شد.\n\n"
+
+            "آیا ادامه می‌دهی؟",
+
+            reply_markup=archive_confirm_keyboard()
+
+        )
+
+    except json.JSONDecodeError:
+
+        IMPORT_SESSIONS.pop(
+            user_id,
+            None
+        )
+
+        await status_message.edit_text(
+
+            "❌ فایل JSON معتبر نیست.\n\n"
+            "ساختار فایل را بررسی کن."
+
+        )
+
+    except UnicodeDecodeError:
+
+        IMPORT_SESSIONS.pop(
+            user_id,
+            None
+        )
+
+        await status_message.edit_text(
+
+            "❌ encoding فایل قابل خواندن نیست.\n\n"
+            "فایل را با UTF-8 ذخیره کن."
+
+        )
+
+    except Exception:
+
+        IMPORT_SESSIONS.pop(
+            user_id,
+            None
+        )
+
+        logger.exception(
+            "Archive import failed"
+        )
+
+        await status_message.edit_text(
+
+            "❌ هنگام خواندن آرشیو خطایی رخ داد.\n\n"
+            "جزئیات خطا در Railway Logs ثبت شده است."
+
+        )
+
+
+# ============================================================
+# CONFIRM ARCHIVE IMPORT
+# ============================================================
+
+@router.callback_query(
+    F.data == "archive_confirm"
+)
+async def archive_confirm(
+    callback
+):
+
+    user_id = callback.from_user.id
+
+    if not is_primary_admin(
+        user_id
+    ):
+
+        await callback.answer(
+            "⛔ فقط ادمین اصلی.",
+            show_alert=True
+        )
+
+        return
+
+    session = IMPORT_SESSIONS.get(
+        user_id
+    )
+
+    if not session:
+
+        await callback.answer(
+            "جلسه ورود آرشیو پیدا نشد.",
+            show_alert=True
+        )
+
+        return
+
+    if session.get(
+        "status"
+    ) != "confirmation":
+
+        await callback.answer(
+            "این آرشیو آماده ورود نیست.",
+            show_alert=True
+        )
+
+        return
+
+    texts = session[
+        "texts"
+    ]
+
+    current_news = session[
+        "current_news"
+    ]
+
+    await callback.message.edit_text(
+
+        "🚀 ورود آرشیو شروع شد...\n\n"
+
+        f"📰 تعداد خبرها: {len(texts)}\n\n"
+
+        "لطفاً تا پایان عملیات صبر کن."
+
+    )
+
+    try:
+
+        # ----------------------------------------------------
+        # اگر تعداد خیلی زیاد است،
+        # embedding و AI ممکن است زمان ببرد.
+        # ----------------------------------------------------
+
+        imported_items = []
+
+        current_id = next_news_id(
+            current_news
+        )
+
+        total = len(texts)
+
+        for number, text in enumerate(
+            texts,
+            start=1
+        ):
+
+            analysis = None
+            embedding = None
+
+            if ai:
+
+                analysis = await analyze_news(
+                    text
+                )
+
+                embedding = await create_embedding(
+                    text
+                )
+
+            lines = [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip()
+            ]
+
+            title = (
+                analysis.get(
+                    "title"
+                )
+                if analysis
+                else
+                (
+                    lines[0][:300]
+                    if lines
+                    else
+                    "بدون عنوان"
+                )
+            )
+
+            item = {
+
+                "id": current_id,
+
+                "title": title,
+
+                "text": text,
+
+                "url": "",
+
+                "category": (
+                    analysis.get(
+                        "category"
+                    )
+                    if analysis
+                    else None
+                ),
+
+                "subject": (
+                    analysis.get(
+                        "subject"
+                    )
+                    if analysis
+                    else None
+                ),
+
+                "event": (
+                    analysis.get(
+                        "event"
+                    )
+                    if analysis
+                    else None
+                ),
+
+                "analysis": analysis,
+
+                "embedding": embedding,
+
+                "added_by": user_id,
+
+                "created_at":
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat(),
+
+                "imported": True
+
+            }
+
+            imported_items.append(
+                item
+            )
+
+            current_id += 1
+
+            # هر 10 خبر یک پیام وضعیت
+            if (
+                number == 1
+                or
+                number % 10 == 0
+                or
+                number == total
+            ):
+
+                try:
+
+                    await callback.message.edit_text(
+
+                        "🚀 در حال وارد کردن آرشیو...\n\n"
+
+                        f"📥 پیشرفت: "
+                        f"{number}/{total}\n\n"
+
+                        f"🧠 هوش مصنوعی: "
+                        f"{'فعال' if ai else 'غیرفعال'}"
+
+                    )
+
+                except Exception:
+                    pass
+
+            # کمی فاصله برای API
+            if ai:
+
+                await asyncio.sleep(
+                    0.15
+                )
+
+        # ----------------------------------------------------
+        # ذخیره
+        # ----------------------------------------------------
+
+        final_news = (
+            current_news
+            +
+            imported_items
+        )
+
+        # فقط ۱۰۰۰ خبر آخر
+        if len(final_news) > MAX_NEWS:
+
+            final_news = final_news[
+                -MAX_NEWS:
+            ]
+
+        save_news(
+            final_news
+        )
+
+        IMPORT_SESSIONS.pop(
+            user_id,
+            None
+        )
+
+        removed = max(
+            0,
+            len(current_news)
+            +
+            len(imported_items)
+            -
+            MAX_NEWS
+        )
+
+        await callback.message.edit_text(
+
+            "✅ ورود آرشیو با موفقیت انجام شد.\n\n"
+
+            f"📥 واردشده: "
+            f"{len(imported_items)}\n"
+
+            f"🔁 تکراری‌های حذف‌شده: "
+            f"{session.get('duplicate_count', 0)}\n"
+
+            f"🗑 حذف‌شده به دلیل ظرفیت ۱۰۰۰: "
+            f"{removed}\n\n"
+
+            f"📚 آرشیو فعلی: "
+            f"{len(final_news)}/{MAX_NEWS}\n\n"
+
+            f"🧠 هوش مصنوعی: "
+            f"{'فعال' if ai else 'غیرفعال'}"
+
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Archive processing failed"
+        )
+
+        IMPORT_SESSIONS.pop(
+            user_id,
+            None
+        )
+
+        await callback.message.edit_text(
+
+            "❌ ورود آرشیو با خطا مواجه شد.\n\n"
+            "Railway Logs را بررسی کن."
+
+        )
+
+    await callback.answer()
+
+
+# ============================================================
+# MAIN KEYBOARD
 # ============================================================
 
 def main_keyboard():
@@ -989,7 +2139,7 @@ def main_keyboard():
                 ),
 
                 InlineKeyboardButton(
-                    text="🔎 جست‌وجوی اخبار",
+                    text="🔎 جست‌وجو",
                     callback_data="menu_search"
                 )
 
@@ -1012,7 +2162,7 @@ def main_keyboard():
             [
 
                 InlineKeyboardButton(
-                    text="🧠 ابزارهای هوش مصنوعی",
+                    text="🧠 هوش مصنوعی",
                     callback_data="menu_ai"
                 )
 
@@ -1021,7 +2171,7 @@ def main_keyboard():
             [
 
                 InlineKeyboardButton(
-                    text="👥 مدیریت ادمین‌ها",
+                    text="👥 ادمین‌ها",
                     callback_data="menu_admins"
                 ),
 
@@ -1037,6 +2187,10 @@ def main_keyboard():
     )
 
 
+# ============================================================
+# AI KEYBOARD
+# ============================================================
+
 def ai_keyboard():
 
     return InlineKeyboardMarkup(
@@ -1046,7 +2200,7 @@ def ai_keyboard():
             [
 
                 InlineKeyboardButton(
-                    text="✍️ بازنویسی خبر",
+                    text="✍️ بازنویسی",
                     callback_data="ai_rewrite"
                 )
 
@@ -1074,7 +2228,7 @@ def ai_keyboard():
                 ),
 
                 InlineKeyboardButton(
-                    text="🚨 تشخیص شایعه",
+                    text="🚨 بررسی شایعه",
                     callback_data="ai_rumor"
                 )
 
@@ -1094,6 +2248,10 @@ def ai_keyboard():
     )
 
 
+# ============================================================
+# ADMIN KEYBOARD
+# ============================================================
+
 def admin_keyboard():
 
     return InlineKeyboardMarkup(
@@ -1103,12 +2261,12 @@ def admin_keyboard():
             [
 
                 InlineKeyboardButton(
-                    text="➕ افزودن ادمین",
+                    text="➕ افزودن",
                     callback_data="admin_add"
                 ),
 
                 InlineKeyboardButton(
-                    text="➖ حذف ادمین",
+                    text="➖ حذف",
                     callback_data="admin_remove"
                 )
 
@@ -1117,7 +2275,7 @@ def admin_keyboard():
             [
 
                 InlineKeyboardButton(
-                    text="📋 لیست ادمین‌ها",
+                    text="📋 لیست",
                     callback_data="admin_list"
                 )
 
@@ -1136,6 +2294,10 @@ def admin_keyboard():
 
     )
 
+
+# ============================================================
+# NEWS KEYBOARDS
+# ============================================================
 
 def new_news_keyboard():
 
@@ -1218,7 +2380,7 @@ def duplicate_keyboard(
             [
 
                 InlineKeyboardButton(
-                    text="👀 مشاهده خبر قبلی",
+                    text="👀 خبر قبلی",
                     callback_data=f"old_{news_index}"
                 )
 
@@ -1227,7 +2389,7 @@ def duplicate_keyboard(
             [
 
                 InlineKeyboardButton(
-                    text="⚖️ مقایسه دو خبر",
+                    text="⚖️ مقایسه",
                     callback_data=f"compare_{news_index}"
                 )
 
@@ -1245,7 +2407,7 @@ def duplicate_keyboard(
             [
 
                 InlineKeyboardButton(
-                    text="✍️ بازنویسی خبر",
+                    text="✍️ بازنویسی",
                     callback_data="pending_rewrite"
                 )
 
@@ -1254,7 +2416,7 @@ def duplicate_keyboard(
             [
 
                 InlineKeyboardButton(
-                    text="✅ این خبر جدید است",
+                    text="✅ خبر جدید است",
                     callback_data="pending_save"
                 )
 
@@ -1299,8 +2461,9 @@ async def start_command(message):
     await message.answer(
 
         "🤖 پنل مدیریت گیمفا\n\n"
-        "سیستم ضدخبرتکراری و دستیار "
-        "هوش مصنوعی آماده است.",
+
+        "سیستم ضدخبرتکراری، آرشیو "
+        "و دستیار هوش مصنوعی آماده است.",
 
         reply_markup=main_keyboard()
 
@@ -1329,11 +2492,12 @@ async def help_command(message):
         "راهنمای ربات گیمفا\n\n"
 
         "📰 خبر را برای ربات ارسال کن.\n"
-        "ربات آن را با آرشیو ۱۰۰۰ خبر "
-        "آخر مقایسه می‌کند.\n\n"
+        "ربات آن را با آرشیو مقایسه می‌کند.\n\n"
 
-        "🧠 سپس هوش مصنوعی موضوع، "
-        "منبع و وضعیت خبر را بررسی می‌کند.\n\n"
+        "📥 برای ورود آرشیو:\n"
+        "پنل ← آرشیو ← ورود آرشیو\n\n"
+
+        "📚 حداکثر ۱۰۰۰ خبر نگهداری می‌شود.\n\n"
 
         "برای شروع /start را بزن."
 
@@ -1382,8 +2546,7 @@ async def send_stats(message):
     for category, count in categories.items():
 
         text += (
-            f"• {category}: "
-            f"{count}\n"
+            f"• {category}: {count}\n"
         )
 
     await message.answer(
@@ -1409,7 +2572,7 @@ async def stats_command(message):
 
 
 # ============================================================
-# MENU CALLBACKS
+# CALLBACK: MAIN MENU
 # ============================================================
 
 @router.callback_query(
@@ -1428,6 +2591,10 @@ async def main_menu(callback):
     await callback.answer()
 
 
+# ============================================================
+# CALLBACK: CHECK
+# ============================================================
+
 @router.callback_query(
     F.data == "menu_check"
 )
@@ -1444,6 +2611,10 @@ async def menu_check(callback):
     await callback.answer()
 
 
+# ============================================================
+# CALLBACK: STATS
+# ============================================================
+
 @router.callback_query(
     F.data == "menu_stats"
 )
@@ -1456,46 +2627,9 @@ async def menu_stats(callback):
     await callback.answer()
 
 
-@router.callback_query(
-    F.data == "menu_archive"
-)
-async def menu_archive(callback):
-
-    news = load_news()
-
-    if not news:
-
-        await callback.message.answer(
-            "📚 آرشیو خالی است."
-        )
-
-        await callback.answer()
-        return
-
-    output = (
-
-        "📚 آخرین اخبار آرشیو:\n\n"
-
-    )
-
-    for item in reversed(
-        news[-10:]
-    ):
-
-        output += (
-
-            f"#{item.get('id')} "
-            f"— "
-            f"{item.get('title', 'بدون عنوان')}\n\n"
-
-        )
-
-    await callback.message.answer(
-        output
-    )
-
-    await callback.answer()
-
+# ============================================================
+# CALLBACK: AI
+# ============================================================
 
 @router.callback_query(
     F.data == "menu_ai"
@@ -1504,7 +2638,7 @@ async def menu_ai(callback):
 
     await callback.message.edit_text(
 
-        "🧠 ابزارهای هوش مصنوعی گیمفا:",
+        "🧠 ابزارهای هوش مصنوعی:",
 
         reply_markup=ai_keyboard()
 
@@ -1590,9 +2724,7 @@ async def admin_add(callback):
     ] = "add_admin"
 
     await callback.message.answer(
-
         "➕ آیدی عددی ادمین جدید را ارسال کن."
-
     )
 
     await callback.answer()
@@ -1613,9 +2745,7 @@ async def admin_remove(callback):
     ] = "remove_admin"
 
     await callback.message.answer(
-
         "➖ آیدی عددی ادمینی که باید حذف شود را ارسال کن."
-
     )
 
     await callback.answer()
@@ -1645,16 +2775,9 @@ async def menu_settings(callback):
         load_news()
     )
 
-    ai_status = (
-        "فعال"
-        if ai
-        else
-        "غیرفعال"
-    )
+    await callback.message.answer(
 
-    text = (
-
-        "⚙️ تنظیمات ربات\n\n"
+        "⚙️ تنظیمات\n\n"
 
         f"📚 آرشیو: "
         f"{news_count}/{MAX_NEWS}\n\n"
@@ -1663,22 +2786,18 @@ async def menu_settings(callback):
         f"{SETTINGS.get('similarity_threshold', 0.72)}\n\n"
 
         f"🧠 هوش مصنوعی: "
-        f"{ai_status}\n\n"
+        f"{'فعال' if ai else 'غیرفعال'}\n\n"
 
-        f"💾 مسیر ذخیره‌سازی:\n"
+        f"💾 مسیر: "
         f"{DATA_DIR}"
 
-    )
-
-    await callback.message.answer(
-        text
     )
 
     await callback.answer()
 
 
 # ============================================================
-# AI MENU
+# AI CALLBACK
 # ============================================================
 
 @router.callback_query(
@@ -1708,16 +2827,14 @@ async def ai_tools(callback):
     )
 
     await callback.message.answer(
-
         "🧠 متن خبر را ارسال کن."
-
     )
 
     await callback.answer()
 
 
 # ============================================================
-# PENDING ACTIONS
+# PENDING SAVE
 # ============================================================
 
 @router.callback_query(
@@ -1746,8 +2863,6 @@ async def pending_save(callback):
         "text"
     ]
 
-    # جلوگیری از ثبت دقیقاً تکراری
-
     for item in news:
 
         if normalize(
@@ -1764,28 +2879,8 @@ async def pending_save(callback):
 
             return
 
-    ids = [
-
-        item.get(
-            "id",
-            0
-        )
-
-        for item in news
-
-        if isinstance(
-            item.get(
-                "id",
-                0
-            ),
-            int
-        )
-
-    ]
-
-    next_id = (
-        max(ids or [0])
-        + 1
+    item_id = next_news_id(
+        news
     )
 
     analysis = (
@@ -1797,7 +2892,7 @@ async def pending_save(callback):
 
     item = {
 
-        "id": next_id,
+        "id": item_id,
 
         "title": (
             analysis.get(
@@ -1855,8 +2950,9 @@ async def pending_save(callback):
 
     await callback.message.answer(
 
-        "💾 خبر با موفقیت در آرشیو ثبت شد.\n\n"
-        f"📚 تعداد اخبار آرشیو: "
+        "💾 خبر با موفقیت ثبت شد.\n\n"
+
+        f"📚 آرشیو: "
         f"{len(news)}/{MAX_NEWS}"
 
     )
@@ -1865,7 +2961,7 @@ async def pending_save(callback):
 
 
 # ============================================================
-# AI ACTIONS FOR PENDING NEWS
+# PENDING AI
 # ============================================================
 
 async def run_pending_ai(
@@ -1992,7 +3088,7 @@ async def run_pending_ai(
 
             await message.answer(
 
-                "🚨 بررسی وضعیت خبر\n\n"
+                "🚨 بررسی خبر\n\n"
 
                 f"وضعیت: "
                 f"{result.get('source_type', 'نامشخص')}\n\n"
@@ -2016,22 +3112,12 @@ async def pending_rewrite(callback):
     )
 
     if not pending:
-
-        await callback.answer(
-            "خبر پیدا نشد.",
-            show_alert=True
-        )
-
         return
 
     await run_pending_ai(
-
         callback.message,
-
         "rewrite",
-
         pending["text"]
-
     )
 
     await callback.answer()
@@ -2171,24 +3257,13 @@ async def show_old_news(callback):
         text = (
 
             "📰 خبر قبلی:\n\n"
-
-            + item.get(
+            +
+            item.get(
                 "text",
                 ""
             )
 
         )
-
-        if item.get(
-            "url"
-        ):
-
-            text += (
-
-                "\n\n🔗 "
-                + item["url"]
-
-            )
 
         await callback.message.answer(
             text
@@ -2233,11 +3308,36 @@ async def compare_callback(
 
         old_news = news[index]
 
-        result = await compare_news(
+        if not pending:
+            raise ValueError(
+                "Pending news not found"
+            )
 
-            pending["text"],
+        prompt = """
 
-            old_news.get(
+دو خبر را مقایسه کن.
+
+فقط JSON:
+
+{
+"same_event":true,
+"score":0,
+"reason":"",
+"differences":[]
+}
+
+score بین 0 تا 100.
+
+"""
+
+        result = await ask_ai_json(
+
+            prompt,
+
+            "خبر جدید:\n"
+            + pending["text"]
+            + "\n\nخبر قبلی:\n"
+            + old_news.get(
                 "text",
                 ""
             )
@@ -2268,7 +3368,7 @@ async def compare_callback(
 
             "⚖️ مقایسه دو خبر\n\n"
 
-            f"📊 شباهت AI: "
+            f"📊 شباهت: "
             f"{result.get('score', 0)}%\n\n"
 
             f"🧠 نتیجه:\n"
@@ -2322,11 +3422,34 @@ async def why_callback(
 
         old_news = news[index]
 
-        result = await explain_duplicate(
+        if not pending:
+            raise ValueError(
+                "Pending news not found"
+            )
 
-            pending["text"],
+        prompt = """
 
-            old_news.get(
+توضیح بده چرا این دو خبر مشابه هستند.
+
+فقط JSON:
+
+{
+"reason":"",
+"shared_entities":[],
+"shared_event":"",
+"important_difference":""
+}
+
+"""
+
+        result = await ask_ai_json(
+
+            prompt,
+
+            "خبر جدید:\n"
+            + pending["text"]
+            + "\n\nخبر قبلی:\n"
+            + old_news.get(
                 "text",
                 ""
             )
@@ -2343,12 +3466,10 @@ async def why_callback(
             return
 
         entities = ", ".join(
-
             result.get(
                 "shared_entities",
                 []
             )
-
         )
 
         await callback.message.answer(
@@ -2410,7 +3531,112 @@ async def close_callback(
 
 
 # ============================================================
-# TEXT PROCESSING
+# SEARCH
+# ============================================================
+
+@router.message(
+    Command("search")
+)
+async def search_command(
+    message
+):
+
+    if not message.from_user:
+        return
+
+    if not is_admin(
+        message.from_user.id
+    ):
+        return
+
+    query = (
+        message.text
+        .partition(" ")[2]
+        .strip()
+    )
+
+    if not query:
+
+        await message.answer(
+            "مثال:\n/search GTA VI"
+        )
+
+        return
+
+    normalized_query = normalize(
+        query
+    )
+
+    results = []
+
+    for item in load_news():
+
+        searchable = normalize(
+
+            " ".join([
+
+                item.get(
+                    "title",
+                    ""
+                ),
+
+                item.get(
+                    "text",
+                    ""
+                ),
+
+                item.get(
+                    "subject",
+                    ""
+                ),
+
+                item.get(
+                    "event",
+                    ""
+                )
+
+            ])
+
+        )
+
+        if normalized_query in searchable:
+
+            results.append(
+                item
+            )
+
+    results = results[-10:]
+
+    if not results:
+
+        await message.answer(
+            "🔎 نتیجه‌ای پیدا نشد."
+        )
+
+        return
+
+    output = (
+        "🔎 نتایج جست‌وجو:\n\n"
+    )
+
+    for item in reversed(
+        results
+    ):
+
+        output += (
+
+            f"#{item.get('id')} — "
+            f"{item.get('title', 'بدون عنوان')}\n\n"
+
+        )
+
+    await message.answer(
+        output
+    )
+
+
+# ============================================================
+# GENERAL TEXT PROCESSING
 # ============================================================
 
 async def process_message(
@@ -2436,13 +3662,13 @@ async def process_message(
     if not text:
         return
 
-    # --------------------------------------------------------
-    # ADMIN ADD
-    # --------------------------------------------------------
-
     waiting = AWAITING.get(
         user_id
     )
+
+    # --------------------------------------------------------
+    # ADD ADMIN
+    # --------------------------------------------------------
 
     if waiting == "add_admin":
 
@@ -2481,13 +3707,13 @@ async def process_message(
         )
 
         await message.answer(
-            "✅ ادمین با موفقیت اضافه شد."
+            "✅ ادمین اضافه شد."
         )
 
         return
 
     # --------------------------------------------------------
-    # ADMIN REMOVE
+    # REMOVE ADMIN
     # --------------------------------------------------------
 
     if waiting == "remove_admin":
@@ -2574,7 +3800,7 @@ async def process_message(
         return
 
     # --------------------------------------------------------
-    # IGNORE COMMANDS
+    # COMMAND
     # --------------------------------------------------------
 
     if text.startswith("/"):
@@ -2597,8 +3823,7 @@ async def process_message(
 
             await message.answer(
 
-                "🔴 این خبر دقیقاً "
-                "در آرشیو وجود دارد.\n\n"
+                "🔴 این خبر قبلاً در آرشیو وجود دارد.\n\n"
 
                 f"📰 خبر قبلی:\n\n"
                 f"{item.get('text', '')}"
@@ -2627,9 +3852,71 @@ async def process_message(
     # FIND SIMILAR
     # --------------------------------------------------------
 
-    matches = await find_similar_news(
-        text
+    matches = []
+
+    for item in news:
+
+        lexical = lexical_similarity(
+
+            text,
+
+            item.get(
+                "text",
+                ""
+            )
+
+        )
+
+        semantic = 0.0
+
+        if (
+            embedding and
+            item.get(
+                "embedding"
+            )
+        ):
+
+            semantic = cosine_similarity(
+
+                embedding,
+
+                item["embedding"]
+
+            )
+
+        if embedding and item.get(
+            "embedding"
+        ):
+
+            score = (
+                0.75 * semantic +
+                0.25 * lexical
+            )
+
+        else:
+
+            score = lexical
+
+        if score >= 0.18:
+
+            matches.append({
+
+                "score": score,
+
+                "lexical": lexical,
+
+                "semantic": semantic,
+
+                "news": item
+
+            })
+
+    matches.sort(
+        key=lambda x: x["score"],
+        reverse=True
     )
+
+    matches = matches[:5]
 
     PENDING[user_id] = {
 
@@ -2679,13 +3966,9 @@ async def process_message(
                 for i, item
                 in enumerate(all_news)
 
-                if item.get(
-                    "id"
-                )
+                if item.get("id")
                 ==
-                old_news.get(
-                    "id"
-                )
+                old_news.get("id")
 
             ),
 
@@ -2706,41 +3989,6 @@ async def process_message(
 
         )
 
-        if old_news.get(
-            "url"
-        ):
-
-            output += (
-
-                "\n\n🔗 "
-                + old_news["url"]
-
-            )
-
-        if analysis:
-
-            output += (
-
-                "\n\n📂 دسته: "
-                + str(
-                    analysis.get(
-                        "category",
-                        "نامشخص"
-                    )
-                )
-
-                +
-
-                "\n🚨 وضعیت: "
-                + str(
-                    analysis.get(
-                        "source_type",
-                        "نامشخص"
-                    )
-                )
-
-            )
-
         await message.answer(
 
             output,
@@ -2754,7 +4002,7 @@ async def process_message(
         return
 
     # --------------------------------------------------------
-    # NEW NEWS
+    # NEW
     # --------------------------------------------------------
 
     output = (
@@ -2774,7 +4022,7 @@ async def process_message(
 
         output += (
 
-            "\n\n📰 تیتر پیشنهادی:\n"
+            "\n\n📰 تیتر:\n"
             f"{analysis.get('title', '')}"
 
             "\n\n📂 دسته: "
@@ -2796,6 +4044,10 @@ async def process_message(
 
     )
 
+
+# ============================================================
+# TEXT HANDLER
+# ============================================================
 
 @router.message(
     F.text | F.caption
@@ -2827,8 +4079,6 @@ async def channel_post_handler(
 
     news = load_news()
 
-    # جلوگیری از ثبت تکراری
-
     for item in news:
 
         if normalize(
@@ -2846,63 +4096,30 @@ async def channel_post_handler(
 
     analysis = None
 
-    # برای کاهش هزینه AI،
-    # تحلیل کامل پست‌های کانال
-    # به صورت پیش‌فرض خاموش است.
-
-    if (
-        os.getenv(
-            "ANALYZE_CHANNEL_POSTS",
-            "false"
-        ).lower()
-        ==
-        "true"
-    ):
+    if os.getenv(
+        "ANALYZE_CHANNEL_POSTS",
+        "false"
+    ).lower() == "true":
 
         analysis = await analyze_news(
             text
         )
 
-    ids = [
-
-        item.get(
-            "id",
-            0
-        )
-
-        for item in news
-
-        if isinstance(
-            item.get(
-                "id",
-                0
-            ),
-            int
-        )
-
-    ]
-
-    next_id = (
-        max(ids or [0])
-        + 1
-    )
-
-    title = (
-
-        analysis.get(
-            "title"
-        )
-        if analysis
-        else
-        text.splitlines()[0][:300]
-
-    )
-
     item = {
 
-        "id": next_id,
+        "id":
+            next_news_id(
+                news
+            ),
 
-        "title": title,
+        "title": (
+            analysis.get(
+                "title"
+            )
+            if analysis
+            else
+            text.splitlines()[0][:300]
+        ),
 
         "text": text,
 
@@ -2962,126 +4179,6 @@ async def channel_post_handler(
 
 
 # ============================================================
-# SEARCH
-# ============================================================
-
-@router.message(
-    Command("search")
-)
-async def search_command(
-    message
-):
-
-    if not message.from_user:
-        return
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    query = (
-        message.text
-        .partition(" ")[2]
-        .strip()
-    )
-
-    if not query:
-
-        await message.answer(
-
-            "مثال:\n"
-            "/search GTA VI"
-
-        )
-
-        return
-
-    normalized_query = normalize(
-        query
-    )
-
-    results = []
-
-    for item in load_news():
-
-        searchable = normalize(
-
-            " ".join([
-
-                item.get(
-                    "title",
-                    ""
-                ),
-
-                item.get(
-                    "text",
-                    ""
-                ),
-
-                item.get(
-                    "subject",
-                    ""
-                ),
-
-                item.get(
-                    "event",
-                    ""
-                )
-
-            ])
-
-        )
-
-        if normalized_query in searchable:
-
-            results.append(
-                item
-            )
-
-    results = results[-10:]
-
-    if not results:
-
-        await message.answer(
-            "🔎 نتیجه‌ای پیدا نشد."
-        )
-
-        return
-
-    output = (
-        "🔎 نتایج جست‌وجو:\n\n"
-    )
-
-    for item in reversed(
-        results
-    ):
-
-        output += (
-
-            f"#{item.get('id')} "
-            f"— "
-            f"{item.get('title', 'بدون عنوان')}\n"
-
-        )
-
-        if item.get(
-            "url"
-        ):
-
-            output += (
-                item["url"]
-                + "\n"
-            )
-
-        output += "\n"
-
-    await message.answer(
-        output
-    )
-
-
-# ============================================================
 # RUN
 # ============================================================
 
@@ -3131,7 +4228,8 @@ async def main():
 
     await dp.start_polling(
         bot,
-        allowed_updates=dp.resolve_used_update_types()
+        allowed_updates=
+            dp.resolve_used_update_types()
     )
 
 
