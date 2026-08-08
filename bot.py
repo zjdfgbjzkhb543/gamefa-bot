@@ -298,14 +298,15 @@ class Database:
         
         return backup_path
     
-    def clean_old_records(self, days: int = None):
-        if days is None:
-            days = int(self.get_setting('cache_days') or CACHE_DAYS)
-        
-        cutoff = datetime.now() - timedelta(days=days)
-        with sqlite3.connect(self.db_file) as conn:
-            conn.execute("DELETE FROM news WHERE created_at < ? AND status = 'rejected'", (cutoff,))
-            conn.execute("VACUUM")
+    ydef clean_old_records(self, days: int = None):
+    if days is None:
+        days = int(self.get_setting('cache_days') or CACHE_DAYS)
+    
+    cutoff = datetime.now() - timedelta(days=days)
+    with sqlite3.connect(self.db_file) as conn:
+        conn.execute("DELETE FROM news WHERE created_at < ? AND status = 'rejected'", (cutoff,))
+        conn.commit()  # 🔥 کلید حل مشکل
+        conn.execute("VACUUM")
     
     def add_admin(self, admin_id: int, name: str = ""):
         with sqlite3.connect(self.db_file) as conn:
