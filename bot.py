@@ -2,6 +2,7 @@ import os
 import re
 import io
 import json
+import math
 import base64
 import sqlite3
 import hashlib
@@ -12,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 from difflib import SequenceMatcher
 
-import numpy as np
 from PIL import Image
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
@@ -202,7 +202,6 @@ def normalize(text: str) -> str:
     text = re.sub(r"[^\w\s\u0600-\u06ff]", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text).strip().lower()
 
-    # اعمال نگاشت مترادفات گیمینگ (Alias Mapping)
     for alias, standard in GAME_ALIASES.items():
         text = re.sub(r'\b' + re.escape(alias) + r'\b', standard, text)
 
@@ -296,11 +295,9 @@ def extract_title(text: str) -> str:
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
-    """محاسبه dHash بهینه‌شده به همراه برش مرکزی برای حذف واترمارک/حاشیه"""
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert('L')
         w, h = img.size
-        # برش ۱۰٪ از حاشیه‌ها برای حذف واترمارک و لوگوی گیمفا
         img = img.crop((int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9)))
         img = img.resize((9, 8), Image.Resampling.LANCZOS)
         
@@ -330,7 +327,7 @@ def hamming_distance(h1: str, h2: str) -> int:
     return sum(c1 != c2 for c1, c2 in zip(h1, h2))
 
 # ============================================================
-# VECTOR SEARCH & SIMILARITY (Idea #7)
+# VECTOR SEARCH & PURE PYTHON MATH (Idea #7 - WITHOUT NUMPY)
 # ============================================================
 
 def sequence_similarity(a: str, b: str) -> float:
@@ -364,24 +361,26 @@ async def make_embedding(text: str) -> Optional[List[float]]:
         logger.exception("Embedding API error: %s", e)
         return None
 
-def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]]) -> np.ndarray:
-    """محاسبه سریع ماتریسی شباهت کسینوسی با NumPy"""
+def cosine_similarity(v1: List[float], v2: List[float]) -> float:
+    if not v1 or not v2 or len(v1) != len(v2):
+        return 0.0
+    dot_product = sum(a * b for a, b in zip(v1, v2))
+    norm_v1 = math.sqrt(sum(a * a for a in v1))
+    norm_v2 = math.sqrt(sum(b * b for b in v2))
+    if norm_v1 == 0 or norm_v2 == 0:
+        return 0.0
+    return dot_product / (norm_v1 * norm_v2)
+
+def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]]) -> List[float]:
     if not vectors or not query_vector:
-        return np.array([])
-    q = np.array(query_vector)
-    matrix = np.array(vectors)
-    q_norm = np.linalg.norm(q)
-    m_norms = np.linalg.norm(matrix, axis=1)
-    m_norms[m_norms == 0] = 1e-10
-    dots = np.dot(matrix, q)
-    return dots / (q_norm * m_norms)
+        return []
+    return [cosine_similarity(query_vector, v) for v in vectors]
 
 # ============================================================
 # VISION AI FOR SHORT TEXT (Idea #5)
 # ============================================================
 
 async def analyze_image_content(image_bytes: bytes) -> str:
-    """تحلیل تصویر توسط Vision AI در صورتی که متن خبر بسیار کوتاه باشد"""
     if not openai_client:
         return ""
     try:
@@ -462,7 +461,7 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         return None
 
 # ============================================================
-# CANDIDATES SELECTION (Vectorized Search)
+# CANDIDATES SELECTION
 # ============================================================
 
 def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
@@ -478,7 +477,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
     clean_title = clean_gaming_text(new_title)
     new_meta = extract_metadata(new_text)
 
-    # پردازش برداری سریع
     valid_vectors = []
     vector_row_indices = []
 
@@ -490,7 +488,7 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
             except Exception:
                 pass
 
-    semantics = np.zeros(len(rows))
+    semantics = [0.0] * len(rows)
     if new_embedding and valid_vectors:
         sim_scores = batch_cosine_similarity(new_embedding, valid_vectors)
         for idx, score in zip(vector_row_indices, sim_scores):
@@ -515,7 +513,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
         effective_title = max(title_score, cross_title)
         semantic = semantics[idx]
 
-        # تطبیق نوع رویداد (Metadata Matching)
         old_meta = extract_metadata(old_text)
         meta_boost = 0.0
         if new_meta["events"] and old_meta["events"]:
@@ -533,7 +530,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
 # ============================================================
 
 async def check_duplicate(text: str, image_hash: Optional[str] = None, image_bytes: Optional[bytes] = None) -> Dict[str, Any]:
-    # اگر متن بسیار کوتاه باشد و عکس وجود داشته باشد، با Vision AI متن تصویر استخراج می‌شود
     if image_bytes and len(text.split()) < 5:
         vision_text = await analyze_image_content(image_bytes)
         if vision_text:
@@ -695,7 +691,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").strip()
     photo = update.message.photo
 
-    # مدیریت دکمه‌های کیبورد اصلی
     if text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
         with get_db() as conn:
             total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
@@ -757,7 +752,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # پردازش عکس و متن خبری
     image_hash = None
     image_bytes = None
 
