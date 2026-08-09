@@ -43,7 +43,7 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_ID", "0").split(",") if i.strip().isdigit()]
+DEFAULT_ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_ID", "0").split(",") if i.strip().isdigit()]
 OWNER_ID = 8202357756
 
 DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
@@ -166,7 +166,7 @@ class AIResult(BaseModel):
     explanation: str = Field(description="تحلیل و دلیل نهایی به زبان فارسی (حداکثر دو جمله)")
 
 # ============================================================
-# DATABASE SETUP
+# DATABASE SETUP & DYNAMIC ADMIN MANAGEMENT
 # ============================================================
 
 def get_db():
@@ -193,10 +193,57 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY,
+                added_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sha256 ON news(sha256)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_url ON news(url)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_image_hash ON news(image_hash)")
+
+        # Populate initial admins
+        initial_admins = set(DEFAULT_ADMIN_IDS + [OWNER_ID])
+        for aid in initial_admins:
+            if aid != 0:
+                conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (aid,))
         conn.commit()
+
+def get_db_admin_ids() -> List[int]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT user_id FROM admins").fetchall()
+        admins = [r["user_id"] for r in rows]
+        if OWNER_ID not in admins:
+            admins.append(OWNER_ID)
+        return admins
+
+def add_admin_db(user_id: int) -> bool:
+    with get_db() as conn:
+        try:
+            conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (user_id,))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding admin: {e}")
+            return False
+
+def remove_admin_db(user_id: int) -> bool:
+    if user_id == OWNER_ID:
+        return False
+    with get_db() as conn:
+        conn.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+        conn.commit()
+        return True
+
+def is_allowed(update: Update) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    allowed_ids = get_db_admin_ids()
+    return user.id in allowed_ids
 
 # ============================================================
 # PERSIAN GAMING PRE-PROCESSING
@@ -692,14 +739,8 @@ def format_old_news_preview(row) -> str:
     )
 
 # ============================================================
-# TELEGRAM HANDLERS (STYLISH UI & FORCE SAVE BUTTON)
+# TELEGRAM HANDLERS
 # ============================================================
-
-def is_allowed(update: Update) -> bool:
-    if not ADMIN_IDS or 0 in ADMIN_IDS:
-        return True
-    user = update.effective_user
-    return bool(user and user.id in ADMIN_IDS)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update) or not update.message:
@@ -723,6 +764,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
     text = (update.message.text or update.message.caption or "").strip()
     photo = update.message.photo
+
+    # Check if user is in "awaiting_admin_id" action state
+    if context.user_data.get("action") == "await_admin_id":
+        if text in ["🔍 بررسی خبر جدید", "📊 آمار آرشیو", "🧠 وضعیت هوش مصنوعی", "📋 راهنما", "⚙️ تنظیمات سیستم", "👥 لیست مدیران", "🗑 پاکسازی کامل آرشیو"]:
+            context.user_data.pop("action", None)
+        else:
+            clean_input = text.strip()
+            if not clean_input.isdigit():
+                await safe_reply_text(update.message, "❌ <b>خطا:</b> لطفاً فقط آیدی عددی کاربر (Numeric Chat ID) را با اعداد انگلیسی وارد کنید.")
+                return
+            
+            new_admin_id = int(clean_input)
+            success = add_admin_db(new_admin_id)
+            context.user_data.pop("action", None)
+            
+            if success:
+                await safe_reply_text(
+                    update.message, 
+                    f"✅ <b>مدیر جدید اضافه شد.</b>\n\nکاربر با آیدی <code>{new_admin_id}</code> با موفقیت به سیستم اضافه گردید.",
+                    reply_markup=MAIN_KEYBOARD
+                )
+            else:
+                await safe_reply_text(update.message, "❌ خطا در ثبت مدیر جدید در دیتابیس.")
+            return
 
     if text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
         with get_db() as conn:
@@ -792,14 +857,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif text == "👥 لیست مدیران":
-        admins_str = "\n".join([f"• <code>{aid}</code>" for aid in ADMIN_IDS if aid != 0])
+        admins = get_db_admin_ids()
+        admins_str = "\n".join([f"• <code>{aid}</code>" for aid in admins if aid != OWNER_ID])
+        
         admin_text = (
             "👥 <b>مدیریت و دسترسی‌های مجاز</b>\n"
             "─── • 💎 • ───\n\n"
             f"👑 <b>مالک اصلی:</b>\n• <code>{OWNER_ID}</code>\n\n"
             f"🛡 <b>ادمین‌های سیستم:</b>\n{admins_str if admins_str else '• موردی تعریف نشده است.'}"
         )
-        await safe_reply_text(update.message, admin_text)
+
+        buttons = []
+        if user_id == OWNER_ID:
+            buttons.append([
+                InlineKeyboardButton("➕ افزودن مدیر", callback_data="admin_add_prompt"),
+                InlineKeyboardButton("❌ حذف مدیر", callback_data="admin_remove_menu")
+            ])
+
+        keyboard = InlineKeyboardMarkup(buttons) if buttons else None
+        await safe_reply_text(update.message, admin_text, reply_markup=keyboard)
         return
 
     image_hash = None
@@ -824,7 +900,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reason = result["reason"]
             old_preview = format_old_news_preview(result.get("row"))
 
-            # Save pending context for manual override button
             context.user_data["pending_news"] = text
             context.user_data["pending_image_hash"] = image_hash
 
@@ -918,6 +993,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
 
+    user_id = update.effective_user.id if update.effective_user else 0
+
     if query.data == "force_save":
         text = context.user_data.get("pending_news")
         image_hash = context.user_data.get("pending_image_hash")
@@ -939,6 +1016,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("pending_news", None)
         context.user_data.pop("pending_image_hash", None)
         await safe_edit_text(query.message, "🗑 <b>خبر به عنوان تکراری علامه‌گذاری و رد شد.</b>")
+
+    # Dynamic Admin Management Callbacks (Owner Only)
+    elif query.data == "admin_add_prompt":
+        if user_id != OWNER_ID:
+            await query.answer("🚫 شما دسترسی مالک را ندارید.", show_alert=True)
+            return
+        
+        context.user_data["action"] = "await_admin_id"
+        await safe_edit_text(
+            query.message,
+            "➕ <b>افزودن مدیر جدید</b>\n"
+            "─── • 💎 • ───\n\n"
+            "لطفاً <b>آیدی عددی (Numeric Chat ID)</b> کاربر مورد نظر را به صورت عدد انگلیسی ارسال کنید:"
+        )
+
+    elif query.data == "admin_remove_menu":
+        if user_id != OWNER_ID:
+            await query.answer("🚫 شما دسترسی مالک را ندارید.", show_alert=True)
+            return
+
+        admins = get_db_admin_ids()
+        remove_buttons = []
+        for aid in admins:
+            if aid != OWNER_ID:
+                remove_buttons.append([InlineKeyboardButton(f"❌ حذف کاربر {aid}", callback_data=f"admin_del_{aid}")])
+
+        if not remove_buttons:
+            await safe_edit_text(query.message, "ℹ️ هیچ مديري غیر از مالک برای حذف وجود ندارد.")
+            return
+
+        keyboard = InlineKeyboardMarkup(remove_buttons)
+        await safe_edit_text(
+            query.message,
+            "❌ <b>حذف مدیر</b>\n"
+            "─── • 💎 • ───\n\n"
+            "مدیر مورد نظر را جهت حذف دسترسی انتخاب کنید:",
+            reply_markup=keyboard
+        )
+
+    elif query.data.startswith("admin_del_"):
+        if user_id != OWNER_ID:
+            await query.answer("🚫 شما دسترسی مالک را ندارید.", show_alert=True)
+            return
+
+        target_id = int(query.data.split("_")[2])
+        if remove_admin_db(target_id):
+            await safe_edit_text(
+                query.message,
+                f"✅ دسترسی مدیریت کاربر <code>{target_id}</code> با موفقیت لغو شد."
+            )
+        else:
+            await safe_edit_text(query.message, "❌ خطا در حذف مدیر.")
 
 # ============================================================
 # MAIN ENTRY POINT
@@ -962,7 +1091,7 @@ def main():
         )
     )
 
-    logger.info("ربات هوشمند گیمفا با قابلیت ذخیره‌سازی دستی اخبار تکراری روشن شد...")
+    logger.info("ربات هوشمند گیمفا با مدیریت کامل و دینامیک مدیران فعال شد...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
