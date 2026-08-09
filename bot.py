@@ -16,7 +16,7 @@ from difflib import SequenceMatcher
 
 from PIL import Image
 import matplotlib
-matplotlib.use('Agg')  # حالت غیرتعاملی برای سرور
+matplotlib.use('Agg')  # تنظیم حالت غیرتعاملی برای محیط سرور/کانتینر
 import matplotlib.pyplot as plt
 
 from openai import AsyncOpenAI
@@ -52,7 +52,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 # شناسه ادمین‌ها (لیست جدا شده با کاما)
 ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_ID", "0").split(",") if i.strip().isdigit()]
 
-# شناسه انحصاری مالك اصلی (فقط این آیدی حق پاکسازی و دریافت بک‌آپ را دارد)
+# شناسه انحصاری مالك اصلی (آیدی عددی خود را جایگزین کنید یا در متغیر محیطی OWNER_ID بگذارید)
 OWNER_ID = int(os.getenv("OWNER_ID", "8202357756"))
 
 DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
@@ -521,7 +521,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").strip()
     photo = update.message.photo
 
-    # منوی دکمه‌ها
+    # ============================================================
+    # مدیریت دستورات و دکمه‌های کیبورد اصلی (جلوگیری از آنالیز متن دکمه‌ها)
+    # ============================================================
     if text == "📈 آمار تصویری":
         chart_buf = generate_analytics_chart_bytes()
         await update.message.reply_photo(photo=chart_buf, caption="📈 **نمودار تحلیل عملکرد سیستم خبر گیمفا**")
@@ -570,7 +572,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply_text(update.message, f"👥 <b>مدیریت دسترسی:</b>\n\n• مالک اصلی: <code>{OWNER_ID}</code>\n• شناسه ادمین‌ها: <code>{admins_str}</code>")
         return
 
-    # پردازش خبر ارسال‌شده
+    elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
+        await safe_reply_text(
+            update.message,
+            "ℹ️ <b>راهنمای بررسی خبر:</b>\n\n"
+            "• متن، تصویر یا پستی که می‌خواهید بررسی شود را مستقیماً به چت بفرستید (یا فوروارد کنید).\n"
+            "• ربات به صورت خودکار آن را در آرشیو مقایسه کرده و نتیجه را اعلام می‌کند."
+        )
+        return
+
+    elif text == "🧠 وضعیت AI":
+        status_ai = "🟢 فعال" if openai_client else "🔴 غیرفعال (کلید API تنظیم نشده)"
+        await safe_reply_text(
+            update.message,
+            f"🧠 <b>وضعیت موتور هوش مصنوعی:</b>\n\n"
+            f"• وضعیت اتصال: {status_ai}\n"
+            f"• مدل پردازش متنی و Vision: <code>{AI_MODEL}</code>\n"
+            f"• مدل Embedding: <code>{EMBEDDING_MODEL}</code>"
+        )
+        return
+
+    # ============================================================
+    # پردازش خبر واقعی ارسال‌شده
+    # ============================================================
     image_hash = None
     image_bytes = None
     if photo:
@@ -611,10 +635,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if assistant_data:
         tags = " ".join([f"#{t.strip('#')}" for t in assistant_data.hashtags])
         response_msg += (
-            f"🚨 <b>سطح اهمیت:</b> {assistant_data.urgency_level}\n\n"
+            f"🚨 <b>سطح اهمیت:</b> {html.escape(assistant_data.urgency_level)}\n\n"
             f"✍️ <b>پیش‌نویس پیشنهاد شده برای انتشار:</b>\n"
             f"«{html.escape(assistant_data.rewritten_text)}»\n\n"
-            f"🏷 <b>هشتگ‌ها:</b>\n{tags}"
+            f"🏷 <b>هشتگ‌ها:</b>\n{html.escape(tags)}"
         )
 
     await safe_edit_text(status, response_msg)
