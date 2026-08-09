@@ -46,7 +46,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_ID", "0").split(",") if i.strip().isdigit()]
 
 # شناسه انحصاری مالك اصلی (فقط این آیدی حق پاکسازی آرشیو را دارد)
-OWNER_ID = int(os.getenv("OWNER_ID", str(ADMIN_IDS[0] if ADMIN_IDS else 0)))
+OWNER_ID = 8202357756
 
 DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
 ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "150"))
