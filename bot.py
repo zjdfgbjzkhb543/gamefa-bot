@@ -1,47 +1,50 @@
 import os
 import re
 import json
+import zipfile
 import hashlib
+import sqlite3
 import logging
-import asyncio
-from datetime import datetime, timedelta, timezone
+import tempfile
+import unicodedata
 from difflib import SequenceMatcher
-from typing import List, Dict, Optional
+from urllib.parse import urlparse
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from pydantic import BaseModel
+from openai import OpenAI
+
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-from openai import AsyncOpenAI
-
 
 # =========================================================
-# CONFIG
+# SETTINGS
 # =========================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini").strip()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
-
-SIMILARITY_THRESHOLD = float(
-    os.getenv("SIMILARITY_THRESHOLD", "0.82")
+MAX_ARCHIVE = int(
+    os.getenv("MAX_ARCHIVE", "100")
 )
 
-MAX_STORED_NEWS = int(
-    os.getenv("MAX_STORED_NEWS", "500")
+DB_PATH = os.getenv(
+    "DB_PATH",
+    "gamefa_archive.db"
+)
+
+# مدلی که برای داوری Duplicate استفاده می‌شود
+AI_MODEL = os.getenv(
+    "AI_MODEL",
+    "gpt-5.5"
 )
 
 
@@ -50,1047 +53,1460 @@ MAX_STORED_NEWS = int(
 # =========================================================
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-logger = logging.getLogger("GamefaDuplicateBot")
-
-
-# =========================================================
-# VALIDATION
-# =========================================================
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        "BOT_TOKEN environment variable is missing."
-    )
-
-
-def parse_admins(value: str) -> set:
-    result = set()
-
-    for item in value.split(","):
-        item = item.strip()
-
-        if not item:
-            continue
-
-        try:
-            result.add(int(item))
-        except ValueError:
-            logger.warning(
-                "Invalid ADMIN_IDS value ignored: %s",
-                item
-            )
-
-    return result
-
-
-ADMIN_IDS = parse_admins(ADMIN_IDS_RAW)
+logger = logging.getLogger(
+    "GAMEFA_AI_DUPLICATE"
+)
 
 
 # =========================================================
 # OPENAI
 # =========================================================
 
-ai_client: Optional[AsyncOpenAI] = None
+ai = None
 
 if OPENAI_API_KEY:
-    ai_client = AsyncOpenAI(
+
+    ai = OpenAI(
         api_key=OPENAI_API_KEY
     )
 
-    logger.info("OpenAI AI detection is enabled.")
 
-else:
-    logger.warning(
-        "OPENAI_API_KEY is not set. "
-        "Bot will use local duplicate detection only."
+# =========================================================
+# AI STRUCTURED OUTPUT
+# =========================================================
+
+class DuplicateDecision(BaseModel):
+
+    decision: str
+
+    confidence: float
+
+    reason: str
+
+    same_event: bool
+
+    same_claim: bool
+
+
+# =========================================================
+# DATABASE
+# =========================================================
+
+def get_db():
+
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30
     )
 
+    conn.row_factory = sqlite3.Row
+
+    conn.execute(
+        "PRAGMA journal_mode=WAL"
+    )
+
+    conn.execute(
+        "PRAGMA synchronous=NORMAL"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            source_id TEXT,
+
+            date TEXT,
+
+            text TEXT NOT NULL,
+
+            raw_text TEXT NOT NULL,
+
+            title TEXT,
+
+            url TEXT,
+
+            exact_hash TEXT UNIQUE,
+
+            imported_at TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_exact_hash
+        ON messages(exact_hash)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_url
+        ON messages(url)
+    """)
+
+    conn.commit()
+
+    return conn
+
 
 # =========================================================
-# IN-MEMORY NEWS STORAGE
-# =========================================================
-#
-# فقط دو فایل پروژه داریم.
-# بنابراین دیتابیس جداگانه وجود ندارد.
-#
-# اخبار در RAM نگه داشته می‌شوند.
-#
-# نکته:
-# با Restart شدن Railway، لیست اخبار از بین می‌رود.
+# PERMISSION
 # =========================================================
 
-news_storage: List[Dict] = []
+async def allowed(update):
+
+    if ADMIN_ID == 0:
+        return True
+
+    user = update.effective_user
+
+    return bool(
+        user and
+        user.id == ADMIN_ID
+    )
 
 
 # =========================================================
 # TEXT NORMALIZATION
 # =========================================================
 
-def normalize_text(text: str) -> str:
-    """
-    نرمال‌سازی بسیار جدی برای جلوگیری از مشکل
-    تشخیص ندادن خبر کاملاً مشابه.
-    """
+def normalize_text(text):
 
-    if not text:
+    if text is None:
         return ""
 
     text = str(text)
 
-    # حذف URL
-    text = re.sub(
-        r"https?://\S+|www\.\S+",
-        " ",
-        text,
-        flags=re.IGNORECASE,
+    text = unicodedata.normalize(
+        "NFC",
+        text
     )
 
-    # حذف منشن
-    text = re.sub(
-        r"@\w+",
-        " ",
-        text,
+    text = text.replace(
+        "\r\n",
+        "\n"
     )
 
-    # تبدیل حروف عربی به فارسی
+    text = text.replace(
+        "\r",
+        "\n"
+    )
+
+    text = text.replace(
+        "\u200c",
+        " "
+    )
+
     replacements = {
+
         "ي": "ی",
         "ى": "ی",
-        "ئ": "ی",
+
         "ك": "ک",
+
         "ة": "ه",
         "ۀ": "ه",
+
         "ؤ": "و",
+
         "إ": "ا",
         "أ": "ا",
-        "ٱ": "ا",
-        "ـ": "",
+        "ٱ": "ا"
     }
 
     for old, new in replacements.items():
-        text = text.replace(old, new)
 
-    # اعداد فارسی/عربی به انگلیسی
-    persian_digits = "۰۱۲۳۴۵۶۷۸۹"
-    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
-    english_digits = "0123456789"
+        text = text.replace(
+            old,
+            new
+        )
 
-    translation = {}
-
-    for p, e in zip(persian_digits, english_digits):
-        translation[ord(p)] = e
-
-    for a, e in zip(arabic_digits, english_digits):
-        translation[ord(a)] = e
-
-    text = text.translate(translation)
-
-    # حذف نیم‌فاصله
-    text = text.replace("\u200c", " ")
-    text = text.replace("\u200d", " ")
-
-    # حذف ایموجی و کاراکترهای اضافی
     text = re.sub(
-        r"[^\w\sآ-ی]",
+        r"[ \t\f\v]+",
         " ",
-        text,
-        flags=re.UNICODE,
+        text
     )
 
-    # کوچک کردن حروف انگلیسی
-    text = text.lower()
-
-    # حذف فاصله‌های اضافی
     text = re.sub(
-        r"\s+",
-        " ",
-        text,
+        r"\n{3,}",
+        "\n\n",
+        text
     )
 
     return text.strip()
 
 
+def compact(text):
+
+    return re.sub(
+        r"\s+",
+        " ",
+        normalize_text(text)
+    ).strip()
+
+
 # =========================================================
-# EXACT HASH
+# HASH
 # =========================================================
 
-def text_hash(text: str) -> str:
-    normalized = normalize_text(text)
+def exact_hash(text):
 
     return hashlib.sha256(
-        normalized.encode("utf-8")
+        normalize_text(
+            text
+        ).encode("utf-8")
     ).hexdigest()
 
 
 # =========================================================
-# TOKENIZATION
+# URL
 # =========================================================
 
-STOP_WORDS = {
-    "و",
-    "در",
-    "به",
-    "از",
-    "با",
-    "برای",
-    "که",
-    "این",
-    "آن",
-    "را",
-    "است",
-    "شد",
-    "شود",
-    "کرد",
-    "می",
-    "نیز",
-    "هم",
-    "یا",
-    "بر",
-    "تا",
-    "اما",
-    "اگر",
-    "یک",
-    "های",
-    "ها",
-    "روی",
-    "همین",
-    "دارد",
-    "دارد",
-}
+URL_RE = re.compile(
+    r"https?://[^\s<>\]\)\"']+",
+    re.IGNORECASE
+)
 
 
-def get_words(text: str) -> set:
-    normalized = normalize_text(text)
+def extract_urls(text):
 
-    words = normalized.split()
+    result = []
+
+    for url in URL_RE.findall(
+        text or ""
+    ):
+
+        url = url.rstrip(
+            ".,؛،!?؟"
+        )
+
+        try:
+
+            p = urlparse(url)
+
+            if not p.netloc:
+                continue
+
+            scheme = p.scheme.lower()
+            domain = p.netloc.lower()
+            path = p.path.rstrip("/")
+
+            # fragment را حذف می‌کنیم
+            canonical = (
+                scheme
+                + "://"
+                + domain
+                + path
+            )
+
+            if p.query:
+
+                canonical += (
+                    "?"
+                    + p.query
+                )
+
+            result.append(
+                canonical
+            )
+
+        except Exception:
+            pass
+
+    return list(
+        dict.fromkeys(result)
+    )
+
+
+def article_url(text):
+
+    urls = extract_urls(text)
+
+    if not urls:
+        return ""
+
+    # اولویت با لینک گیمفا
+    for url in urls:
+
+        if "gamefa.com" in url.lower():
+
+            return url
+
+    return urls[0]
+
+
+# =========================================================
+# TELEGRAM EXPORT
+# =========================================================
+
+def extract_text(value):
+
+    if isinstance(
+        value,
+        str
+    ):
+        return value
+
+    if isinstance(
+        value,
+        list
+    ):
+
+        result = []
+
+        for item in value:
+
+            if isinstance(
+                item,
+                dict
+            ):
+
+                result.append(
+                    str(
+                        item.get(
+                            "text",
+                            ""
+                        )
+                    )
+                )
+
+            else:
+
+                result.append(
+                    str(item)
+                )
+
+        return "".join(result)
+
+    if value is None:
+        return ""
+
+    return str(value)
+
+
+def extract_title(text):
+
+    if not text:
+        return ""
+
+    for line in text.splitlines():
+
+        line = compact(line)
+
+        if line:
+
+            return line[:500]
+
+    return ""
+
+
+def parse_message(raw):
+
+    text = extract_text(
+        raw.get(
+            "text",
+            ""
+        )
+    ).strip()
 
     return {
-        word
-        for word in words
-        if len(word) >= 2
-        and word not in STOP_WORDS
+
+        "source_id":
+            str(
+                raw.get(
+                    "id",
+                    ""
+                )
+            ),
+
+        "date":
+            str(
+                raw.get(
+                    "date",
+                    ""
+                )
+            ),
+
+        "text":
+            text,
+
+        "title":
+            extract_title(text),
+
+        "url":
+            article_url(text)
     }
 
 
 # =========================================================
-# LOCAL SIMILARITY
+# CLASSIC SIMILARITY
 # =========================================================
 
-def jaccard_similarity(
-    text1: str,
-    text2: str,
-) -> float:
+def token_set(text):
 
-    words1 = get_words(text1)
-    words2 = get_words(text2)
+    return set(
+        re.findall(
+            r"[\w\u0600-\u06ff]+",
+            compact(text).lower(),
+            re.UNICODE
+        )
+    )
 
-    if not words1 or not words2:
+
+def jaccard(a, b):
+
+    A = token_set(a)
+    B = token_set(b)
+
+    if not A or not B:
         return 0.0
 
-    intersection = len(words1 & words2)
-    union = len(words1 | words2)
-
-    if union == 0:
-        return 0.0
-
-    return intersection / union
+    return len(A & B) / len(A | B)
 
 
-def sequence_similarity(
-    text1: str,
-    text2: str,
-) -> float:
-
-    a = normalize_text(text1)
-    b = normalize_text(text2)
-
-    if not a or not b:
-        return 0.0
+def sequence_score(a, b):
 
     return SequenceMatcher(
         None,
-        a,
-        b,
+        compact(a).lower(),
+        compact(b).lower()
     ).ratio()
 
 
-def local_similarity(
-    text1: str,
-    text2: str,
-) -> float:
+def classic_similarity(new, old):
 
-    jaccard = jaccard_similarity(
-        text1,
-        text2,
+    a = new["text"]
+    b = old["text"]
+
+    if normalize_text(a) == normalize_text(b):
+
+        return 1.0
+
+    if (
+        len(compact(a)) < 120
+        or
+        len(compact(b)) < 120
+    ):
+
+        return 0.0
+
+    seq = sequence_score(
+        a,
+        b
     )
 
-    sequence = sequence_similarity(
-        text1,
-        text2,
+    jac = jaccard(
+        a,
+        b
     )
 
-    # ترکیب دو الگوریتم
     return (
-        jaccard * 0.55
+        seq * 0.70
         +
-        sequence * 0.45
+        jac * 0.30
     )
 
 
 # =========================================================
-# REMOVE OLD NEWS
+# AI JUDGE
 # =========================================================
 
-def cleanup_old_news():
-    """
-    فقط اخبار مربوط به امروز و دیروز نگه داشته می‌شوند.
-    """
+def ai_compare(
+    new_message,
+    old_message
+):
 
-    global news_storage
+    if ai is None:
 
-    now = datetime.now(timezone.utc)
+        logger.warning(
+            "OPENAI_API_KEY is not configured."
+        )
 
-    cutoff = now - timedelta(days=1)
+        return {
+            "decision": "UNCERTAIN",
+            "confidence": 0,
+            "reason": "AI unavailable",
+            "same_event": False,
+            "same_claim": False
+        }
 
-    before = len(news_storage)
 
-    news_storage = [
-        news
-        for news in news_storage
-        if news["created_at"] >= cutoff
+    new_text = new_message[
+        "text"
     ]
 
-    removed = before - len(news_storage)
+    old_text = old_message[
+        "text"
+    ]
 
-    if removed:
-        logger.info(
-            "Removed %s old news.",
-            removed
-        )
-
-
-# =========================================================
-# ADD NEWS
-# =========================================================
-
-def add_news(text: str, user_id: int):
-    cleanup_old_news()
-
-    item = {
-        "id": hashlib.md5(
-            f"{datetime.now().timestamp()}-{text}".encode()
-        ).hexdigest()[:10],
-
-        "text": text,
-
-        "normalized": normalize_text(text),
-
-        "hash": text_hash(text),
-
-        "created_at": datetime.now(
-            timezone.utc
-        ),
-
-        "user_id": user_id,
-    }
-
-    news_storage.insert(
-        0,
-        item,
-    )
-
-    # محدودیت امنیتی
-    if len(news_storage) > MAX_STORED_NEWS:
-        del news_storage[MAX_STORED_NEWS:]
-
-
-# =========================================================
-# FIND EXACT DUPLICATE
-# =========================================================
-
-def find_exact_duplicate(
-    text: str,
-) -> Optional[Dict]:
-
-    current_hash = text_hash(text)
-
-    for news in news_storage:
-
-        if news["hash"] == current_hash:
-            return news
-
-    return None
-
-
-# =========================================================
-# FIND LOCAL SIMILAR NEWS
-# =========================================================
-
-def find_local_similar(
-    text: str,
-) -> List[Dict]:
-
-    results = []
-
-    for news in news_storage:
-
-        score = local_similarity(
-            text,
-            news["text"],
-        )
-
-        if score >= 0.60:
-
-            results.append(
-                {
-                    "news": news,
-                    "score": score,
-                }
-            )
-
-    results.sort(
-        key=lambda x: x["score"],
-        reverse=True,
-    )
-
-    return results[:5]
-
-
-# =========================================================
-# AI DUPLICATE DETECTION
-# =========================================================
-
-async def ai_check_duplicate(
-    new_text: str,
-    old_news: List[Dict],
-) -> Optional[Dict]:
-
-    if not ai_client:
-        return None
-
-    if not old_news:
-        return None
-
-    candidates = []
-
-    for index, item in enumerate(old_news):
-
-        candidates.append(
-            f"""
-خبر قبلی شماره {index + 1}:
-{item["text"]}
-"""
-        )
-
-    candidates_text = "\n".join(
-        candidates
-    )
 
     prompt = f"""
-تو سیستم تشخیص خبر تکراری یک کانال خبری گیمینگ هستی.
+دو خبر زیر را به عنوان یک ویراستار حرفه‌ای اخبار گیمینگ مقایسه کن.
 
-خبر جدید:
+هدف فقط این است که بفهمی آیا این دو خبر
+درباره «همان رویداد خبری / همان ادعای اصلی» هستند یا نه.
+
+قوانین بسیار مهم:
+
+1. صرفاً یکسان بودن موضوع کافی نیست.
+2. صرفاً یکسان بودن نام بازی، فیلم، شرکت یا شخص کافی نیست.
+3. اگر هر دو خبر درباره یک بازی باشند ولی دو اتفاق متفاوت را گزارش کنند،
+   NEW محسوب می‌شوند.
+4. اگر یکی خبر اعلام یک اتفاق و دیگری همان اتفاق با بیان متفاوت باشد،
+   DUPLICATE محسوب می‌شوند.
+5. تغییر جزئی در ترجمه، ساختار جمله، طول متن، تیتر یا لحن نباید مانع
+   تشخیص Duplicate شود.
+6. اگر درباره Duplicate بودن مطمئن نیستی، UNCERTAIN بده.
+7. برای کاهش False Positive محافظه‌کار باش.
+8. خبرهای مربوط به دو شایعه، دو مصاحبه یا دو رویداد متفاوت را یکی نکن.
+9. تاریخ متفاوت به تنهایی باعث NEW شدن نمی‌شود؛ ممکن است یک خبر
+   همان رویداد را بعداً با اطلاعات تکمیلی گزارش کند.
+10. اما اگر ادعای اصلی تغییر کرده باشد، NEW است.
+
+خبر اول:
+
+عنوان:
+{new_message["title"]}
+
+متن:
 {new_text}
 
-خبرهای قبلی:
-{candidates_text}
 
-وظیفه:
-بررسی کن آیا خبر جدید درباره همان رویداد خبری
-یکی از خبرهای قبلی است یا نه.
+خبر دوم:
 
-مهم:
-- فقط به شباهت کلمات نگاه نکن.
-- اگر دو متن با کلمات متفاوت یک اتفاق واحد را گزارش می‌کنند،
-  آن‌ها را تکراری در نظر بگیر.
-- اگر موضوع فقط مشابه است ولی رویداد متفاوت است،
-  تکراری حساب نکن.
-- اگر همان خبر با تیتر متفاوت نوشته شده،
-  تکراری حساب کن.
-- اگر فقط درباره یک بازی/فیلم/بازیگر مشابه صحبت می‌کنند
-  ولی اتفاق متفاوت است، تکراری نیست.
+عنوان:
+{old_message["title"]}
 
-فقط JSON معتبر برگردان:
+متن:
+{old_text}
 
-{{
-  "duplicate": true,
-  "match_index": 1,
-  "confidence": 0.95,
-  "reason": "دلیل کوتاه فارسی"
-}}
 
-اگر هیچ خبر قبلی تکراری نیست:
-
-{{
-  "duplicate": false,
-  "match_index": null,
-  "confidence": 0.0,
-  "reason": "خبر جدید است"
-}}
+فقط بر اساس معنای خبری تصمیم بگیر.
 """
+
 
     try:
 
-        response = await ai_client.responses.create(
+        response = ai.responses.parse(
             model=AI_MODEL,
-            input=prompt,
+
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an extremely conservative "
+                        "news duplicate detection system."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+
+            text_format=DuplicateDecision
         )
 
-        result_text = response.output_text.strip()
 
-        # حذف احتمالی Markdown
-        result_text = re.sub(
-            r"```json|```",
-            "",
-            result_text,
-            flags=re.IGNORECASE,
-        ).strip()
+        # پیدا کردن structured output
+        for output in response.output:
 
-        result = json.loads(
-            result_text
-        )
+            if output.type != "message":
+                continue
 
-        return result
-
-    except Exception as e:
-
-        logger.exception(
-            "AI duplicate detection failed: %s",
-            e,
-        )
-
-        return None
-
-
-# =========================================================
-# MAIN DUPLICATE ENGINE
-# =========================================================
-
-async def check_duplicate(
-    text: str,
-) -> Dict:
-
-    cleanup_old_news()
-
-    # -----------------------------------------------------
-    # مرحله 1:
-    # EXACT HASH
-    # -----------------------------------------------------
-
-    exact = find_exact_duplicate(
-        text
-    )
-
-    if exact:
-
-        return {
-            "duplicate": True,
-            "type": "exact",
-            "confidence": 1.0,
-            "match": exact,
-            "reason": "این خبر دقیقاً قبلاً ارسال شده است.",
-        }
-
-    # -----------------------------------------------------
-    # مرحله 2:
-    # LOCAL SIMILARITY
-    # -----------------------------------------------------
-
-    similar = find_local_similar(
-        text
-    )
-
-    # اگر شباهت خیلی بالا باشد،
-    # بدون نیاز به AI هم تکراری محسوب می‌شود.
-    if similar:
-
-        best = similar[0]
-
-        if best["score"] >= 0.90:
-
-            return {
-                "duplicate": True,
-                "type": "local",
-                "confidence": best["score"],
-                "match": best["news"],
-                "reason": "شباهت متنی بسیار بالا است.",
-            }
-
-    # -----------------------------------------------------
-    # مرحله 3:
-    # AI
-    # -----------------------------------------------------
-
-    candidates = []
-
-    # فقط کاندیدهای نزدیک را به AI می‌دهیم
-    for item in similar[:5]:
-        candidates.append(
-            item["news"]
-        )
-
-    # اگر هیچ کاندید مناسبی نبود،
-    # AI را با تمام اخبار دیروز مقایسه می‌کنیم.
-    if not candidates:
-        candidates = news_storage[:20]
-
-    if candidates:
-
-        ai_result = await ai_check_duplicate(
-            text,
-            candidates,
-        )
-
-        if ai_result:
-
-            if ai_result.get("duplicate") is True:
-
-                index = ai_result.get(
-                    "match_index"
-                )
-
-                match = None
+            for item in output.content:
 
                 if (
-                    isinstance(index, int)
-                    and 1 <= index <= len(candidates)
+                    item.type
+                    !=
+                    "output_text"
                 ):
-                    match = candidates[
-                        index - 1
-                    ]
+                    continue
 
-                return {
-                    "duplicate": True,
-                    "type": "ai",
-                    "confidence": float(
-                        ai_result.get(
-                            "confidence",
-                            0.0
-                        )
-                    ),
-                    "match": match,
-                    "reason": ai_result.get(
-                        "reason",
-                        "هوش مصنوعی این خبر را تکراری تشخیص داد."
-                    ),
-                }
+                if item.parsed:
 
-    # -----------------------------------------------------
-    # NEW
-    # -----------------------------------------------------
+                    result = item.parsed
+
+                    decision = (
+                        result.decision
+                        .upper()
+                        .strip()
+                    )
+
+                    if decision not in (
+                        "DUPLICATE",
+                        "NEW",
+                        "UNCERTAIN"
+                    ):
+
+                        decision = "UNCERTAIN"
+
+                    return {
+
+                        "decision":
+                            decision,
+
+                        "confidence":
+                            max(
+                                0,
+                                min(
+                                    1,
+                                    float(
+                                        result.confidence
+                                    )
+                                )
+                            ),
+
+                        "reason":
+                            result.reason,
+
+                        "same_event":
+                            bool(
+                                result.same_event
+                            ),
+
+                        "same_claim":
+                            bool(
+                                result.same_claim
+                            )
+                    }
+
+
+    except Exception as error:
+
+        logger.exception(
+            "OpenAI comparison failed: %s",
+            error
+        )
+
 
     return {
-        "duplicate": False,
-        "type": "new",
-        "confidence": 0.0,
-        "match": None,
-        "reason": "خبر جدید است.",
+
+        "decision":
+            "UNCERTAIN",
+
+        "confidence":
+            0,
+
+        "reason":
+            "AI comparison failed",
+
+        "same_event":
+            False,
+
+        "same_claim":
+            False
     }
 
 
 # =========================================================
-# AUTH
+# FIND DUPLICATE
 # =========================================================
 
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+def find_duplicate(
+    conn,
+    message
+):
+
+    # -----------------------------------------------------
+    # 1. EXACT TEXT
+    # -----------------------------------------------------
+
+    fingerprint = exact_hash(
+        message["text"]
+    )
+
+    row = conn.execute(
+        """
+        SELECT *
+        FROM messages
+        WHERE exact_hash = ?
+        LIMIT 1
+        """,
+        (
+            fingerprint,
+        )
+    ).fetchone()
+
+    if row:
+
+        return True, "EXACT_TEXT"
+
+
+    # -----------------------------------------------------
+    # 2. SAME ARTICLE URL
+    # -----------------------------------------------------
+
+    if message["url"]:
+
+        row = conn.execute(
+            """
+            SELECT *
+            FROM messages
+            WHERE url = ?
+            LIMIT 1
+            """,
+            (
+                message["url"],
+            )
+        ).fetchone()
+
+        if row:
+
+            return True, "SAME_URL"
+
+
+    # -----------------------------------------------------
+    # 3. FIND CANDIDATES
+    # -----------------------------------------------------
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM messages
+        """
+    ).fetchall()
+
+
+    candidates = []
+
+
+    for row in rows:
+
+        old = dict(row)
+
+        score = classic_similarity(
+            message,
+            old
+        )
+
+        candidates.append(
+            (
+                score,
+                old
+            )
+        )
+
+
+    candidates.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+
+    # -----------------------------------------------------
+    # 4. CLEARLY DIFFERENT
+    # -----------------------------------------------------
+
+    # فقط اگر شباهت واقعاً پایین باشد
+    # AI را بی‌دلیل صدا نمی‌زنیم.
+
+    if (
+        not candidates
+        or
+        candidates[0][0] < 0.35
+    ):
+
+        return False, "NEW"
+
+
+    # -----------------------------------------------------
+    # 5. AI ANALYSIS
+    # -----------------------------------------------------
+
+    # حداکثر چند کاندیدای نزدیک
+    # تا مصرف API کنترل شود.
+
+    top_candidates = candidates[:5]
+
+
+    for score, old in top_candidates:
+
+        # متن‌های خیلی کوتاه را
+        # به AI نمی‌فرستیم مگر اینکه
+        # عنوان بسیار مشابه باشد.
+
+        title_score = sequence_score(
+            message["title"],
+            old["title"]
+        )
+
+
+        should_ai = (
+
+            score >= 0.45
+
+            or
+
+            title_score >= 0.75
+
+            or
+
+            message["url"]
+            and
+            old["url"]
+            and
+            message["url"]
+            == old["url"]
+        )
+
+
+        if not should_ai:
+
+            continue
+
+
+        result = ai_compare(
+            message,
+            old
+        )
+
+
+        logger.info(
+            "AI: %s | confidence=%s | reason=%s",
+            result["decision"],
+            result["confidence"],
+            result["reason"]
+        )
+
+
+        # -------------------------------------------------
+        # AI DUPLICATE
+        # -------------------------------------------------
+
+        if (
+            result["decision"]
+            ==
+            "DUPLICATE"
+
+            and
+
+            result["confidence"]
+            >=
+            0.90
+
+            and
+
+            result["same_event"]
+
+            and
+
+            result["same_claim"]
+        ):
+
+            return True, "AI_DUPLICATE"
+
+
+        # -------------------------------------------------
+        # AI UNCERTAIN
+        # -------------------------------------------------
+
+        # عمداً چیزی حذف نمی‌کنیم.
+
+        if (
+            result["decision"]
+            ==
+            "UNCERTAIN"
+        ):
+
+            continue
+
+
+    # -----------------------------------------------------
+    # NO CONFIDENT DUPLICATE
+    # -----------------------------------------------------
+
+    return False, "NEW"
 
 
 # =========================================================
-# KEYBOARD
+# IMPORT
 # =========================================================
 
-def main_keyboard():
+def import_messages(
+    messages
+):
 
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "📰 بررسی خبر",
-                    callback_data="check_info",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "📊 آمار",
-                    callback_data="stats",
-                ),
-                InlineKeyboardButton(
-                    "🗑 پاکسازی",
-                    callback_data="cleanup",
-                ),
-            ],
-        ]
+    conn = get_db()
+
+    added = 0
+    duplicates = 0
+    skipped = 0
+    ai_checks = 0
+
+
+    for raw in messages:
+
+        try:
+
+            message = parse_message(
+                raw
+            )
+
+
+            if not message[
+                "text"
+            ]:
+
+                skipped += 1
+
+                continue
+
+
+            duplicate, reason = (
+                find_duplicate(
+                    conn,
+                    message
+                )
+            )
+
+
+            if duplicate:
+
+                logger.info(
+                    "DUPLICATE: %s",
+                    reason
+                )
+
+                duplicates += 1
+
+                continue
+
+
+            fingerprint = exact_hash(
+                message[
+                    "text"
+                ]
+            )
+
+
+            conn.execute(
+                """
+                INSERT INTO messages
+                (
+                    source_id,
+                    date,
+                    text,
+                    raw_text,
+                    title,
+                    url,
+                    exact_hash,
+                    imported_at
+                )
+
+                VALUES
+                (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    datetime('now')
+                )
+                """,
+
+                (
+
+                    message[
+                        "source_id"
+                    ],
+
+                    message[
+                        "date"
+                    ],
+
+                    normalize_text(
+                        message[
+                            "text"
+                        ]
+                    ),
+
+                    message[
+                        "text"
+                    ],
+
+                    message[
+                        "title"
+                    ],
+
+                    message[
+                        "url"
+                    ],
+
+                    fingerprint
+                )
+            )
+
+
+            added += 1
+
+
+        except sqlite3.IntegrityError:
+
+            duplicates += 1
+
+
+        except Exception as error:
+
+            logger.exception(
+                "Import error: %s",
+                error
+            )
+
+            skipped += 1
+
+
+    # =====================================================
+    # KEEP ONLY LAST 100
+    # =====================================================
+
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM messages
+        ORDER BY
+            CASE
+                WHEN date = ''
+                THEN imported_at
+                ELSE date
+            END DESC,
+            id DESC
+        """
+    ).fetchall()
+
+
+    if len(rows) > MAX_ARCHIVE:
+
+        for row in rows[
+            MAX_ARCHIVE:
+        ]:
+
+            conn.execute(
+                """
+                DELETE FROM messages
+                WHERE id = ?
+                """,
+                (
+                    row["id"],
+                )
+            )
+
+
+    conn.commit()
+
+    conn.close()
+
+
+    return (
+        added,
+        duplicates,
+        skipped
     )
 
 
 # =========================================================
-# /START
+# LOAD EXPORT
+# =========================================================
+
+def load_json(path):
+
+    with open(
+        path,
+        "r",
+        encoding="utf-8-sig"
+    ) as f:
+
+        data = json.load(f)
+
+
+    if isinstance(
+        data,
+        dict
+    ):
+
+        return data.get(
+            "messages",
+            []
+        )
+
+
+    return data
+
+
+def load_zip(path):
+
+    with zipfile.ZipFile(
+        path,
+        "r"
+    ) as archive:
+
+        names = archive.namelist()
+
+
+        candidates = [
+            x
+            for x in names
+            if x.lower().endswith(
+                "result.json"
+            )
+        ]
+
+
+        if not candidates:
+
+            candidates = [
+                x
+                for x in names
+                if x.lower().endswith(
+                    ".json"
+                )
+            ]
+
+
+        if not candidates:
+
+            raise ValueError(
+                "فایل JSON داخل ZIP پیدا نشد."
+            )
+
+
+        with archive.open(
+            candidates[0]
+        ) as f:
+
+            data = json.loads(
+                f.read().decode(
+                    "utf-8-sig"
+                )
+            )
+
+
+    if isinstance(
+        data,
+        dict
+    ):
+
+        return data.get(
+            "messages",
+            []
+        )
+
+
+    return data
+
+
+def load_export(path):
+
+    if path.lower().endswith(
+        ".json"
+    ):
+
+        return load_json(
+            path
+        )
+
+
+    if path.lower().endswith(
+        ".zip"
+    ):
+
+        return load_zip(
+            path
+        )
+
+
+    raise ValueError(
+        "فقط ZIP یا JSON."
+    )
+
+
+# =========================================================
+# START
 # =========================================================
 
 async def start(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    if not user:
+    if not await allowed(
+        update
+    ):
         return
 
-    if not is_admin(user.id):
-
-        await update.message.reply_text(
-            "⛔ شما دسترسی استفاده از این ربات را ندارید."
-        )
-
-        return
-
-    cleanup_old_news()
 
     await update.message.reply_text(
-        "🤖 ربات تشخیص اخبار تکراری گیمفا\n\n"
-        "خبر را همین‌جا برای من بفرست.\n"
-        "من بررسی می‌کنم که آیا قبلاً همین خبر "
-        "یا همان رویداد با بیان متفاوت ارسال شده است یا نه.\n\n"
-        "🧠 تشخیص دقیق + هوش مصنوعی\n"
-        "📅 نگهداری اخبار: فقط دیروز\n"
-        "📤 ارسال خودکار به کانال: غیرفعال",
-        reply_markup=main_keyboard(),
+        """
+🤖 موتور AI تشخیص اخبار تکراری گیمفا
+
+تمرکز اصلی ربات:
+تشخیص اینکه دو خبر واقعاً درباره
+یک اتفاق خبری هستند یا نه.
+
+روش:
+
+✓ متن دقیق
+✓ SHA-256
+✓ لینک مقاله
+✓ شباهت متنی
+✓ شباهت تیتر
+✓ تحلیل معنایی با هوش مصنوعی
+✓ تشخیص رویداد اصلی
+✓ تشخیص ادعای اصلی
+
+اگر AI مطمئن نباشد،
+خبر تکراری حذف نمی‌شود.
+"""
     )
 
 
 # =========================================================
-# /STATS
+# STATS
 # =========================================================
 
 async def stats(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    if not user or not is_admin(user.id):
+    if not await allowed(
+        update
+    ):
         return
 
-    cleanup_old_news()
+
+    conn = get_db()
+
+
+    total = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM messages
+        """
+    ).fetchone()[0]
+
+
+    conn.close()
+
 
     await update.message.reply_text(
-        "📊 آمار ربات\n\n"
-        f"📰 اخبار ذخیره‌شده: {len(news_storage)}\n"
-        f"👥 تعداد ادمین‌ها: {len(ADMIN_IDS)}\n"
-        f"🧠 هوش مصنوعی: "
-        f"{'فعال' if ai_client else 'غیرفعال'}\n"
-        f"📅 بازه نگهداری: ۱ روز",
-        reply_markup=main_keyboard(),
+        f"""
+📊 آمار آرشیو
+
+📦 پیام‌ها:
+{total}
+
+🎯 سقف:
+{MAX_ARCHIVE}
+
+🤖 AI:
+{"فعال" if ai else "غیرفعال"}
+"""
     )
 
 
 # =========================================================
-# /CLEAN
+# CLEAR
 # =========================================================
 
-async def clean_command(
+async def clear(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    if not user or not is_admin(user.id):
+    if not await allowed(
+        update
+    ):
         return
 
-    before = len(news_storage)
 
-    cleanup_old_news()
+    conn = get_db()
 
-    removed = before - len(news_storage)
+    conn.execute(
+        "DELETE FROM messages"
+    )
+
+    conn.commit()
+
+    conn.close()
+
 
     await update.message.reply_text(
-        f"🗑 پاکسازی انجام شد.\n\n"
-        f"حذف‌شده: {removed}\n"
-        f"باقی‌مانده: {len(news_storage)}"
+        "🗑 آرشیو پاک شد."
     )
 
 
 # =========================================================
-# HANDLE NEWS
+# RECEIVE EXPORT
 # =========================================================
 
-async def handle_news(
+async def receive_file(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
-    user = update.effective_user
-
-    if not user or not is_admin(user.id):
-
-        await update.message.reply_text(
-            "⛔ شما دسترسی ارسال خبر ندارید."
-        )
-
+    if not await allowed(
+        update
+    ):
         return
 
-    text = (
-        update.message.text
-        or update.message.caption
-        or ""
-    ).strip()
 
-    if not text:
-
-        await update.message.reply_text(
-            "❌ متن خبر پیدا نشد."
-        )
-
-        return
-
-    if len(text) < 5:
-
-        await update.message.reply_text(
-            "❌ متن خبر خیلی کوتاه است."
-        )
-
-        return
-
-    # پیام وضعیت
-    checking_message = await update.message.reply_text(
-        "🔎 در حال بررسی خبر...\n\n"
-        "1️⃣ بررسی تکراری دقیق\n"
-        "2️⃣ بررسی شباهت متنی\n"
-        "3️⃣ بررسی هوش مصنوعی"
+    document = (
+        update.message.document
     )
+
+
+    if not document:
+        return
+
+
+    filename = (
+        document.file_name
+        or "export"
+    )
+
+
+    if not filename.lower().endswith(
+        (
+            ".zip",
+            ".json"
+        )
+    ):
+
+        await update.message.reply_text(
+            "❌ فقط ZIP یا JSON ارسال کن."
+        )
+
+        return
+
+
+    status = await update.message.reply_text(
+        "⏳ فایل دریافت شد..."
+    )
+
 
     try:
 
-        result = await check_duplicate(
-            text
+        tg_file = (
+            await context.bot.get_file(
+                document.file_id
+            )
         )
 
-        if result["duplicate"]:
 
-            match = result.get(
-                "match"
+        with tempfile.TemporaryDirectory() as temp:
+
+            path = os.path.join(
+                temp,
+                filename
             )
 
-            confidence = (
-                result["confidence"]
-                * 100
+
+            await tg_file.download_to_drive(
+                path
             )
 
-            duplicate_type = result["type"]
 
-            if duplicate_type == "exact":
-                method = "تطبیق دقیق"
-            elif duplicate_type == "local":
-                method = "شباهت متنی"
-            else:
-                method = "هوش مصنوعی"
-
-            old_text = (
-                match["text"]
-                if match
-                else "خبر قبلی پیدا نشد."
+            await status.edit_text(
+                "🔍 در حال خواندن Export..."
             )
 
-            if len(old_text) > 800:
-                old_text = old_text[:800] + "..."
 
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "🔍 بررسی دوباره با AI",
-                            callback_data="ai_again",
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🆕 این خبر جدید است",
-                            callback_data="force_new",
-                        )
-                    ],
-                ]
+            messages = load_export(
+                path
             )
 
-            await checking_message.edit_text(
-                "🔴 خبر تکراری است!\n\n"
-                f"🎯 روش تشخیص: {method}\n"
-                f"📊 اطمینان: {confidence:.1f}%\n\n"
-                f"🧠 دلیل:\n"
-                f"{result['reason']}\n\n"
-                "📰 خبر قبلی:\n"
-                f"{old_text}",
-                reply_markup=keyboard,
+
+            if not messages:
+
+                await status.edit_text(
+                    "⚠️ هیچ پیامی پیدا نشد."
+                )
+
+                return
+
+
+            await status.edit_text(
+                f"🧠 {len(messages):,} پیام پیدا شد.\n"
+                "در حال تحلیل Duplicate..."
             )
 
-        else:
 
-            add_news(
-                text,
-                user.id,
+            added, duplicates, skipped = (
+                import_messages(
+                    messages
+                )
             )
 
-            await checking_message.edit_text(
-                "🟢 خبر جدید است!\n\n"
-                "این خبر در آرشیو دیروز پیدا نشد "
-                "و می‌تواند به عنوان خبر جدید استفاده شود.\n\n"
-                "📥 خبر برای بررسی‌های بعدی ذخیره شد.",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                "📊 آمار",
-                                callback_data="stats",
-                            ),
-                        ]
-                    ]
-                ),
-            )
 
-    except Exception as e:
+        conn = get_db()
+
+
+        total = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM messages
+            """
+        ).fetchone()[0]
+
+
+        conn.close()
+
+
+        await status.edit_text(
+            f"""
+✅ تحلیل تمام شد.
+
+📥 پیام‌های ورودی:
+{len(messages):,}
+
+🆕 خبر جدید:
+{added:,}
+
+♻️ خبر تکراری:
+{duplicates:,}
+
+⚠️ رد شده:
+{skipped:,}
+
+📦 آرشیو فعلی:
+{total:,} / {MAX_ARCHIVE}
+
+🤖 تحلیل معنایی:
+{"فعال" if ai else "غیرفعال"}
+"""
+        )
+
+
+    except zipfile.BadZipFile:
+
+        await status.edit_text(
+            "❌ ZIP خراب است."
+        )
+
+
+    except json.JSONDecodeError:
+
+        await status.edit_text(
+            "❌ JSON نامعتبر است."
+        )
+
+
+    except Exception as error:
 
         logger.exception(
-            "Error processing news: %s",
-            e,
+            "File processing error"
         )
 
-        await checking_message.edit_text(
-            "❌ هنگام بررسی خبر خطایی رخ داد.\n\n"
-            "لطفاً دوباره تلاش کن."
+        await status.edit_text(
+            f"❌ خطا:\n{error}"
         )
-
-
-# =========================================================
-# CALLBACKS
-# =========================================================
-
-async def callbacks(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    user = update.effective_user
-
-    if not user or not is_admin(user.id):
-
-        await query.answer(
-            "⛔ دسترسی ندارید.",
-            show_alert=True,
-        )
-
-        return
-
-    data = query.data
-
-    # -----------------------------------------------------
-    # INFO
-    # -----------------------------------------------------
-
-    if data == "check_info":
-
-        await query.edit_message_text(
-            "📰 بررسی خبر\n\n"
-            "کافی است متن خبر را برای ربات ارسال کنی.\n\n"
-            "ربات ابتدا Hash دقیق را بررسی می‌کند، "
-            "بعد شباهت متنی و در نهایت هوش مصنوعی "
-            "را برای تشخیص خبرهایی که با بیان متفاوت "
-            "همان اتفاق را گزارش می‌کنند به کار می‌گیرد."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # STATS
-    # -----------------------------------------------------
-
-    if data == "stats":
-
-        cleanup_old_news()
-
-        await query.edit_message_text(
-            "📊 آمار ربات\n\n"
-            f"📰 اخبار ذخیره‌شده: {len(news_storage)}\n"
-            f"👥 ادمین‌ها: {len(ADMIN_IDS)}\n"
-            f"🧠 AI: "
-            f"{'فعال' if ai_client else 'غیرفعال'}\n"
-            "📅 نگهداری: فقط دیروز",
-            reply_markup=main_keyboard(),
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # CLEANUP
-    # -----------------------------------------------------
-
-    if data == "cleanup":
-
-        before = len(news_storage)
-
-        cleanup_old_news()
-
-        removed = before - len(news_storage)
-
-        await query.edit_message_text(
-            "🗑 پاکسازی انجام شد.\n\n"
-            f"حذف‌شده: {removed}\n"
-            f"باقی‌مانده: {len(news_storage)}",
-            reply_markup=main_keyboard(),
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # FORCE NEW
-    # -----------------------------------------------------
-
-    if data == "force_new":
-
-        await query.edit_message_text(
-            "🟢 ثبت شد.\n\n"
-            "این خبر به عنوان خبر جدید پذیرفته شد."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # AI AGAIN
-    # -----------------------------------------------------
-
-    if data == "ai_again":
-
-        await query.edit_message_text(
-            "🧠 برای بررسی دوباره، "
-            "خود خبر را مجدداً ارسال کن."
-        )
-
-        return
-
-
-# =========================================================
-# ERROR HANDLER
-# =========================================================
-
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    logger.exception(
-        "Unhandled exception:",
-        exc_info=context.error,
-    )
 
 
 # =========================================================
@@ -1099,79 +1515,76 @@ async def error_handler(
 
 def main():
 
-    logger.info(
-        "Starting Gamefa Duplicate News Bot..."
-    )
+    if not BOT_TOKEN:
 
-    logger.info(
-        "Admins: %s",
-        ADMIN_IDS,
-    )
+        raise RuntimeError(
+            "BOT_TOKEN تنظیم نشده است."
+        )
 
-    logger.info(
-        "AI: %s",
-        "enabled" if ai_client else "disabled",
-    )
 
-    app = (
+    if not OPENAI_API_KEY:
+
+        logger.warning(
+            "OPENAI_API_KEY تنظیم نشده؛ "
+            "AI Duplicate فعال نخواهد بود."
+        )
+
+
+    get_db().close()
+
+
+    application = (
         Application
         .builder()
-        .token(BOT_TOKEN)
+        .token(
+            BOT_TOKEN
+        )
         .build()
     )
 
-    # Commands
-    app.add_handler(
+
+    application.add_handler(
         CommandHandler(
             "start",
-            start,
+            start
         )
     )
 
-    app.add_handler(
+
+    application.add_handler(
         CommandHandler(
             "stats",
-            stats,
+            stats
         )
     )
 
-    app.add_handler(
+
+    application.add_handler(
         CommandHandler(
-            "clean",
-            clean_command,
+            "clear",
+            clear
         )
     )
 
-    # Buttons
-    app.add_handler(
-        CallbackQueryHandler(
-            callbacks
-        )
-    )
 
-    # News
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_news,
+            filters.Document.ALL,
+            receive_file
         )
     )
 
-    # Errors
-    app.add_error_handler(
-        error_handler
-    )
 
     logger.info(
-        "Bot is running..."
-    )
-
-    app.run_polling(
-        drop_pending_updates=True
+        "GAMEFA AI DUPLICATE ENGINE STARTED"
     )
 
 
-# =========================================================
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES
+    )
+
 
 if __name__ == "__main__":
+
     main()
