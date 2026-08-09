@@ -126,7 +126,7 @@ def init_db():
         conn.commit()
 
 # ============================================================
-# 1 & 2. PERSIAN GAMING PRE-PROCESSING & ENTITY EXTRACTION
+# PERSIAN GAMING PRE-PROCESSING & ENTITY EXTRACTION
 # ============================================================
 
 PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -142,7 +142,6 @@ DECORATION_PATTERN = re.compile(
     r'[-=_*~•▪️▫️🔹🔸🔻🔺🔴🟢🟡⚡️🔥💎📌📍📝📢📣💡🎮🟣🆔]+'
 )
 
-# لیست کلمات توقف فارسی برای استخراج دقیق کلمات کلیدی
 PERSIAN_STOPWORDS = {
     "در", "یک", "از", "به", "با", "که", "را", "روی", "بر", "برای", "شد", "کرد",
     "است", "بود", " شد", "این", "آن", "هم", "نیز", "تا", "چون", "باید", "ستاره"
@@ -173,23 +172,18 @@ def clean_gaming_text(text: str) -> str:
     return normalize(text)
 
 def extract_entities(text: str) -> set:
-    """استخراج موجودیت‌های کلیدی شامل کلمات فارسی باارزش، اسامی انگلیسی و اعداد"""
     if not text:
         return set()
     cleaned = clean_gaming_text(text)
     words = cleaned.split()
     
-    # کلمات معنی‌دار فارسی (غیر از Stopwords و کلمات زیر ۳ حرف)
     persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 3)
-    # کلمات انگلیسی
     eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{2,}\b', text))
-    # اعداد
     numbers = set(re.findall(r'\b\d+\b', text))
     
     return persian_entities | eng_entities | numbers
 
 def entity_overlap_score(text1: str, text2: str) -> float:
-    """محاسبه میزان اشتراک موجودیت‌های کلیدی"""
     e1 = extract_entities(text1)
     e2 = extract_entities(text2)
     if not e1 or not e2:
@@ -198,7 +192,6 @@ def entity_overlap_score(text1: str, text2: str) -> float:
     return len(intersection) / min(len(e1), len(e2))
 
 def token_overlap_ratio(text1: str, text2: str) -> float:
-    """محاسبه درصد اشتراک کلمات کلیدی تیترها (برای پوشش عدم تشابه محض رشته‌ای)"""
     words1 = extract_entities(text1)
     words2 = extract_entities(text2)
     if not words1 or not words2:
@@ -241,7 +234,7 @@ def extract_title(text: str) -> str:
     return title[:600]
 
 # ============================================================
-# 6. IMAGE PERCEPTUAL HASHING (dHash)
+# IMAGE PERCEPTUAL HASHING (dHash)
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
@@ -318,7 +311,7 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot / ((na ** 0.5) * (nb ** 0.5))
 
 # ============================================================
-# 4. FEW-SHOT PROMPTING AI JUDGE
+# FEW-SHOT PROMPTING AI JUDGE
 # ============================================================
 
 async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
@@ -330,22 +323,10 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
 تکلیف: تشخیص بده آیا این دو خبر مربوط به یک موضوع/رویداد یکسان هستند یا خیر.
 
 قوانین تحلیل:
-۱. اگر هر دو خبر درباره یک حادثه، شخص، یا رویداد یکسان باشند (حتی با کلمات متفاوت مثلاً "از حال رفت" و "روی زمین افتاد") -> duplicate: true.
+۱. اگر هر دو خبر درباره یک حادثه، شخص، یا رویداد یکسان باشند (حتی با کلمات متفاوت) -> duplicate: true.
 ۲. اگر یکی از متن‌ها فقط "تیتر کوتاه" و دیگری "متن کامل" همان خبر باشد -> duplicate: true.
 ۳. اگر خبر دوم بروزرسانی یا اعلام قیمت/تاریخ بعد از خبر اول باشد -> duplicate: true, is_update: true.
 ۴. اگر دو خبر درباره یک بازی/شخص اما دو رویداد کاملاً مجزا باشند -> duplicate: false.
-
-نمونه‌های الگو (Few-Shot Examples):
-
-نمونه ۱:
-خبر A: "کریستوفر لمبرت ستاره Highlander در یک رویداد از حال رفت"
-خبر B: "کریستوفر لمبرت ستاره Highlander در رویداد Steel City Comic-Con روی زمین افتاد"
-نتیجه: duplicate = true, is_update = false (هر دو خبر به افتادن کریستوفر لمبرت اشاره دارند).
-
-نمونه ۲:
-خبر A: "کنسول پلی‌استیشن ۵ پرو رسماً معرفی شد"
-خبر B: "قیمت و تاریخ عرضه پلی‌استیشن ۵ پرو مشخص شد"
-نتیجه: duplicate = true, is_update = true.
 """
 
     user_prompt = f"""
@@ -373,7 +354,7 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         return None
 
 # ============================================================
-# 3. TEMPORAL DECAY & CANDIDATES SELECTION
+# CANDIDATES SELECTION
 # ============================================================
 
 def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
@@ -441,18 +422,15 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None) -> Dict[s
 
     def fast_checks():
         with get_db() as conn:
-            # ۱. بررسی هش دقیق متن
             row = conn.execute("SELECT * FROM news WHERE sha256 = ? LIMIT 1", (fingerprint,)).fetchone()
             if row:
                 return {"duplicate": True, "reason": "exact_hash", "confidence": 1.0, "row": row}
 
-            # ۲. بررسی لینک یکسان خبر
             if url:
                 row = conn.execute("SELECT * FROM news WHERE url = ? LIMIT 1", (url,)).fetchone()
                 if row:
                     return {"duplicate": True, "reason": "exact_url", "confidence": 1.0, "row": row}
 
-            # ۳. بررسی کاور یکسان تصویر
             if image_hash:
                 img_rows = conn.execute("SELECT * FROM news WHERE image_hash IS NOT NULL AND image_hash != '' ORDER BY id DESC LIMIT 50").fetchall()
                 for r in img_rows:
@@ -460,7 +438,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None) -> Dict[s
                     if dist <= 6:
                         return {"duplicate": True, "reason": "image_match", "confidence": 0.95, "row": r}
 
-            # ۴. بررسی ترکیبی تشابه تیترها (رشته‌ای + اشتراک کلمات کلیدی/موجودیت‌ها)
             rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT ?", (ARCHIVE_SIZE,)).fetchall()
             clean_t = clean_gaming_text(title)
 
@@ -470,8 +447,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None) -> Dict[s
                     if old_title:
                         seq_sim = SequenceMatcher(None, clean_t, old_title).ratio()
                         token_sim = token_overlap_ratio(title, r["title"] or "")
-                        
-                        # اگر اشتراک کلمات کلیدی تیتر بالای ۶۰٪ یا شباهت ساختاری بالای ۸۰٪ باشد
                         if seq_sim >= 0.80 or token_sim >= 0.60:
                             return {
                                 "duplicate": True,
@@ -524,7 +499,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None) -> Dict[s
             if result.duplicate and conf >= 0.60:
                 return {"duplicate": True, "reason": "ai_ambiguous", "confidence": conf, "row": row, "explanation": result.explanation}
 
-    # ۵. الگوریتم پشتیبان (Fallback) در صورت عدم اجرای AI یا لزوم دقت بالاتر
     if candidates:
         top_ranking, top_semantic, top_lexical, top_ner, top_row = candidates[0]
         if top_ner >= 0.65 or (top_lexical >= 0.50 and top_ner >= 0.50):
@@ -590,21 +564,82 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").strip()
     photo = update.message.photo
 
+    # ------------------------------------------------------------
+    # مدیریت کامل دکمه‌های کیبورد اصلی
+    # ------------------------------------------------------------
     if text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
         with get_db() as conn:
             total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
-        await update.message.reply_text(f"📊 *اخبار آرشیو:* {total}/{ARCHIVE_SIZE}", parse_mode="Markdown")
+        await update.message.reply_text(f"📊 *وضعیت دیتابیس و آرشیو:*\n\nتعداد اخبار ذخیره‌شده: `{total}/{ARCHIVE_SIZE}`", parse_mode="Markdown")
         return
+
     elif text == "🗑 پاکسازی کامل آرشیو":
         with get_db() as conn:
             conn.execute("DELETE FROM news")
             conn.commit()
-        await update.message.reply_text("🗑 آرشیو کاملاً پاکسازی شد.", reply_markup=MAIN_KEYBOARD)
-        return
-    elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
-        await update.message.reply_text("ℹ️ متن یا عکس پست تلگرام را بفرستید.")
+        await update.message.reply_text("🗑 *آرشیو دیتابیس با موفقیت پاکسازی شد.*", reply_markup=MAIN_KEYBOARD, parse_mode="Markdown")
         return
 
+    elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
+        await update.message.reply_text(
+            "ℹ️ *راهنمای استفاده از ربات:*\n\n"
+            "• کافیست متن یا تصویر پست جدید تلگرام را ارسال کنید.\n"
+            "• ربات آن را در ۶ لایه (هش، لینک، تصویر، شباهت تیتر، موجودیت‌ها و هوش مصنوعی) آنالیز می‌کند.\n"
+            "• در صورت تکراری بودن، سیستم به شما هشدار داده و خبر ذخیره نمی‌شود.",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif text == "🧠 وضعیت AI":
+        status_ai = "🟢 فعال" if openai_client else "🔴 غیرفعال (کلید API تنظیم نشده)"
+        await update.message.reply_text(
+            f"🧠 *وضعیت موتور هوش مصنوعی:*\n\n"
+            f"• وضعیت اتصال: {status_ai}\n"
+            f"• مدل پردازش متنی: `{AI_MODEL}`\n"
+            f"• مدل Embedding: `{EMBEDDING_MODEL}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif text == "⚙️ تنظیمات":
+        await update.message.reply_text(
+            f"⚙️ *تنظیمات فعلی ربات:*\n\n"
+            f"• حداکثر ظرفیت آرشیو: `{ARCHIVE_SIZE}` خبر\n"
+            f"• شناسه ادمین مجاز: `{ADMIN_ID}`\n"
+            f"• مدل هوش مصنوعی: `{AI_MODEL}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif text == "💬 پشتیبانی":
+        await update.message.reply_text(
+            "💬 *پشتیبانی و ارتباط:* \n\n"
+            "جهت گزارش مشکلات یا اعمال تغییرات با توسعه‌دهنده در ارتباط باشید.",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif text == "👥 ادمین‌ها":
+        await update.message.reply_text(
+            f"👥 *مدیریت دسترسی:*\n\n"
+            f"• شناسه ادمین اصلی: `{ADMIN_ID}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif text == "📜 قوانین":
+        await update.message.reply_text(
+            "📜 *قوانین و ضوابط بررسی اخبار:*\n\n"
+            "۱. پست‌های حاوی متون بسیار کوتاه (زیر ۱۰ کاراکتر) پردازش نمی‌شوند.\n"
+            "۲. اخبار تکراری حتی با تغییر کلمات یا بازنویسی شناسایی خواهند شد.\n"
+            "۳. اخبار تکمیلی و بروزرسانی‌ها (Update) به عنوان خبر تکراری شناسایی می‌شوند.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ------------------------------------------------------------
+    # پردازش عکس و متن خبری
+    # ------------------------------------------------------------
     image_hash = None
     if photo:
         file = await context.bot.get_file(photo[-1].file_id)
