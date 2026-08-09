@@ -26,7 +26,7 @@ from telegram.ext import (
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-OPENAI_API_KEY = os.getenv("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", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
 # اگر 0 باشد همه می‌توانند از ربات استفاده کنند.
 # برای محدود کردن، ADMIN_ID را تنظیم کن.
