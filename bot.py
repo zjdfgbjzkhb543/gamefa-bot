@@ -102,10 +102,10 @@ EVENT_TYPES = [
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("🔍 بررسی خبر جدید"), KeyboardButton("📊 آمار آرشیو")],
-        [KeyboardButton("🧠 وضعیت هوش مصنوعی"), KeyboardButton("📋 راهنما")],
+        [KeyboardButton("🔍 بررسی خبر جدید"), KeyboardButton("📚 مشاهده و مدیریت آرشیو")],
+        [KeyboardButton("📊 آمار آرشیو"), KeyboardButton("🧠 وضعیت هوش مصنوعی")],
         [KeyboardButton("⚙️ تنظیمات سیستم"), KeyboardButton("👥 لیست مدیران")],
-        [KeyboardButton("🗑 پاکسازی کامل آرشیو")]
+        [KeyboardButton("📋 راهنما"), KeyboardButton("🗑 پاکسازی کامل آرشیو")]
     ],
     resize_keyboard=True
 )
@@ -658,7 +658,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
 
         ranking = (((effective_title * 0.35) + (semantic * 0.35) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost) * time_penalty
 
-        # [تغییر کلیدی 1]: افزایش شدید ضریب رتبه‌بندی برای پیام‌های کوتاه با اشتراک اسامی خاص
         if ner_score >= 0.30:
             ranking += 0.35
             
@@ -686,7 +685,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     url = get_article_url(text)
     new_meta = extract_metadata(text)
 
-    # [تغییر کلیدی 2]: حد آستانه حدس AI برای پیام‌های کوتاه سبک‌تر شد
     required_conf = 0.55 if word_count < 15 else (0.60 if word_count >= 30 else 0.70)
 
     def fast_checks():
@@ -730,7 +728,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     embedding = await make_embedding(cleaned)
     candidates = await asyncio.to_thread(get_candidates_sync, text, embedding)
 
-    # [تغییر کلیدی 3]: پایین آوردن آستانه ورود کاندیداها به AI تا اخبار کوتاه حذف نشوند
     min_threshold = 0.05 if word_count < 15 else 0.15
     stage1_candidates = [c for c in candidates if c[0] >= min_threshold][:4]
 
@@ -825,6 +822,52 @@ def format_old_news_preview(row) -> str:
     )
 
 # ============================================================
+# ARCHIVE MANAGEMENT & PAGINATION HELPERS
+# ============================================================
+
+def delete_news_by_id(news_id: int) -> bool:
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM news WHERE id = ?", (news_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+def get_archive_page(page: int = 1, page_size: int = 5) -> Tuple[List[sqlite3.Row], int, int]:
+    with get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
+        total_pages = max(1, math.ceil(total / page_size))
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * page_size
+        rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT ? OFFSET ?", (page_size, offset)).fetchall()
+        return rows, page, total_pages
+
+def build_archive_markup(rows: List[sqlite3.Row], current_page: int, total_pages: int) -> InlineKeyboardMarkup:
+    buttons = []
+    
+    # دکمه‌های اکشن هر خبر در صفحه
+    for r in rows:
+        news_id = r["id"]
+        title_snippet = (r["title"] or r["text"])[:25].strip() + "..."
+        buttons.append([
+            InlineKeyboardButton(f"📄 {title_snippet}", callback_data=f"arch_view_{news_id}"),
+            InlineKeyboardButton("🗑 حذف", callback_data=f"arch_del_{news_id}_{current_page}")
+        ])
+    
+    # دکمه‌های صفحه‌بندی
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton("▶️ قبلی", callback_data=f"arch_page_{current_page - 1}"))
+    
+    nav_buttons.append(InlineKeyboardButton(f"صفحه {current_page} از {total_pages}", callback_data="ignore"))
+    
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("بعدی ◀️", callback_data=f"arch_page_{current_page + 1}"))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+        
+    return InlineKeyboardMarkup(buttons)
+
+# ============================================================
 # TELEGRAM HANDLERS
 # ============================================================
 
@@ -833,16 +876,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     welcome_text = (
-        "✨ <b>سامانه هوشمند پایش و تشخیص اخبار تکراری گیمفا v3.1 (اصلاح شده)</b>\n"
+        "✨ <b>سامانه هوشمند پایش و تشخیص اخبار تکراری گیمفا v3.2</b>\n"
         "─── • 💎 • ───\n\n"
-        "مجهز به ۴ زیرسیستم ارتقایافته:\n"
+        "مجهز به سیستم مدیریت و پاکسازی تکی آرشیو اخبار\n"
         "🔹 <b>معماری دو مرحله‌ای AI:</b> سرعت بالا با gpt-4o-mini و دقت بالا با gpt-4o\n"
-        "🔹 <b>تکنیک HyDE:</b> ایمبدینگ برداری بر اساس چکیده کلیدی خبر\n"
-        "🔹 <b>سیستم یادگیری از ادمین:</b> یادگیری الگوهای تحریریه بر اساس تصمیمات شما\n"
+        "🔹 <b>مدیریت کامل آرشیو:</b> مشاهده لیست اخبار و حذف دانه به دانه موارد نامرتبط\n"
         "🔹 <b>بینایی ماشین OCR:</b> تحلیل کامل متن پوسترها"
     )
 
     await safe_reply_text(update.message, welcome_text, reply_markup=MAIN_KEYBOARD)
+
+async def render_archive_page_message(message, page: int = 1, edit: bool = False):
+    rows, current_page, total_pages = get_archive_page(page=page, page_size=5)
+    
+    if not rows:
+        text = "📭 <b>آرشیو اخبار در حال حاضر خالی است.</b>"
+        if edit:
+            await safe_edit_text(message, text)
+        else:
+            await safe_reply_text(message, text)
+        return
+
+    text_lines = [f"📚 <b>لیست اخبار ذخیره شده در آرشیو (صفحه {current_page} از {total_pages}):</b>\n─── • 💎 • ───\n"]
+    for idx, r in enumerate(rows, 1):
+        num = (current_page - 1) * 5 + idx
+        snippet = (r["title"] or r["text"])[:70].replace("\n", " ") + "..."
+        created = r["created_at"][:16] if r["created_at"] else "نامشخص"
+        text_lines.append(f"<b>{num}. ID: {r['id']}</b> | <i>{html.escape(created)}</i>\n«{html.escape(snippet)}»\n")
+
+    text_lines.append("<i>برای مشاهده متن کامل یا حذف، روی دکمه‌های زیر کلیک کنید:</i>")
+    full_text = "\n".join(text_lines)
+    markup = build_archive_markup(rows, current_page, total_pages)
+
+    if edit:
+        await safe_edit_text(message, full_text, reply_markup=markup)
+    else:
+        await safe_reply_text(message, full_text, reply_markup=markup)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update) or not update.message:
@@ -853,7 +922,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo
 
     if context.user_data.get("action") == "await_admin_id":
-        if text in ["🔍 بررسی خبر جدید", "📊 آمار آرشیو", "🧠 وضعیت هوش مصنوعی", "📋 راهنما", "⚙️ تنظیمات سیستم", "👥 لیست مدیران", "🗑 پاکسازی کامل آرشیو"]:
+        if text in ["🔍 بررسی خبر جدید", "📚 مشاهده و مدیریت آرشیو", "📊 آمار آرشیو", "🧠 وضعیت هوش مصنوعی", "📋 راهنما", "⚙️ تنظیمات سیستم", "👥 لیست مدیران", "🗑 پاکسازی کامل آرشیو"]:
             context.user_data.pop("action", None)
         else:
             clean_input = text.strip()
@@ -871,7 +940,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_reply_text(update.message, "❌ خطا در ثبت ادمین.")
             return
 
-    if text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
+    if text == "📚 مشاهده و مدیریت آرشیو":
+        await render_archive_page_message(update.message, page=1, edit=False)
+        return
+
+    elif text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
         with get_db() as conn:
             total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
             feedback_count = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
@@ -1064,8 +1137,54 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user_id = update.effective_user.id if update.effective_user else 0
+    data = query.data
 
-    if query.data == "force_save":
+    if data == "ignore":
+        return
+
+    # [دستورات مدیریت آرشیو]
+    if data.startswith("arch_page_"):
+        page_num = int(data.split("_")[2])
+        await render_archive_page_message(query.message, page=page_num, edit=True)
+
+    elif data.startswith("arch_view_"):
+        news_id = int(data.split("_")[2])
+        with get_db() as conn:
+            row = conn.execute("SELECT * FROM news WHERE id = ?", (news_id,)).fetchone()
+        
+        if not row:
+            await query.answer("❌ این خبر یافت نشد یا قبلاً حذف شده است.", show_alert=True)
+            return
+
+        escaped_text = html.escape(row["text"])
+        created = row["created_at"] or "نامشخص"
+        
+        detail_text = (
+            f"📄 <b>جزئیات خبر آرشیو (ID: {news_id})</b>\n"
+            f"📅 <b>تاریخ ثبت:</b> <code>{created}</code>\n"
+            f"─── • 💎 • ───\n\n"
+            f"<blockquote>{escaped_text}</blockquote>"
+        )
+        
+        back_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 حذف همین خبر", callback_data=f"arch_del_{news_id}_1")],
+            [InlineKeyboardButton("🔙 بازگشت به لیست آرشیو", callback_data="arch_page_1")]
+        ])
+        await safe_edit_text(query.message, detail_text, reply_markup=back_markup)
+
+    elif data.startswith("arch_del_"):
+        parts = data.split("_")
+        news_id = int(parts[2])
+        return_page = int(parts[3]) if len(parts) > 3 else 1
+        
+        if delete_news_by_id(news_id):
+            await query.answer("✅ خبر با موفقیت از آرشیو حذف شد.", show_alert=True)
+            await render_archive_page_message(query.message, page=return_page, edit=True)
+        else:
+            await query.answer("❌ خطا در حذف؛ ممکن است خبر قبلاً حذف شده باشد.", show_alert=True)
+
+    # [دستورات قبلی]
+    elif data == "force_save":
         text = context.user_data.get("pending_news")
         image_hash = context.user_data.get("pending_image_hash")
         old_text = context.user_data.get("matched_old_text", "")
@@ -1087,7 +1206,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await safe_edit_text(query.message, "❌ اطلاعات منقضی شده است.")
 
-    elif query.data == "force_discard":
+    elif data == "force_discard":
         text = context.user_data.get("pending_news", "")
         old_text = context.user_data.get("matched_old_text", "")
         
@@ -1099,7 +1218,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("matched_old_text", None)
         await safe_edit_text(query.message, "🗑 <b>خبر تکراری تشخیص داده شد و الگوی رد ثبت گردید.</b>")
 
-    elif query.data == "admin_add_prompt":
+    elif data == "admin_add_prompt":
         if user_id != OWNER_ID:
             await query.answer("🚫 دسترسی محدود.", show_alert=True)
             return
@@ -1107,7 +1226,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["action"] = "await_admin_id"
         await safe_edit_text(query.message, "➕ لطفاً آیدی عددی کاربر جدید را ارسال کنید:")
 
-    elif query.data == "admin_remove_menu":
+    elif data == "admin_remove_menu":
         if user_id != OWNER_ID:
             await query.answer("🚫 دسترسی محدود.", show_alert=True)
             return
@@ -1121,12 +1240,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_edit_text(query.message, "❌ مدیر مورد نظر را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(remove_buttons))
 
-    elif query.data.startswith("admin_del_"):
+    elif data.startswith("admin_del_"):
         if user_id != OWNER_ID:
             await query.answer("🚫 دسترسی محدود.", show_alert=True)
             return
 
-        target_id = int(query.data.split("_")[2])
+        target_id = int(data.split("_")[2])
         if remove_admin_db(target_id):
             await safe_edit_text(query.message, f"✅ دسترسی کاربر <code>{target_id}</code> لغو شد.")
         else:
@@ -1154,9 +1273,8 @@ def main():
         )
     )
 
-    logger.info("ربات ارتقایافته گیمفا نسخه 3.1 (با پشتیبانی کامل از متن‌های کوتاه) فعال شد...")
+    logger.info("ربات گیمفا نسخه 3.2 (با قابلیت مدیریت کامل آرشیو و حذف تکی) فعال شد...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
