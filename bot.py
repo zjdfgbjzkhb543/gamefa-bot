@@ -50,11 +50,9 @@ DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
 ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "150"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-# [ایده ۳]: مدل ارزان/سریع برای ارزیابی اولیه + مدل اصلی برای ارزیابی ثانویه
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o")
 FAST_AI_MODEL = os.getenv("FAST_AI_MODEL", "gpt-4o-mini")
 
-# [ایده ۱]: بازه زمانی اعتبار اخبار (بر حسب روز)
 MAX_NEWS_AGE_DAYS = int(os.getenv("MAX_NEWS_AGE_DAYS", "14"))
 MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))
 
@@ -82,6 +80,8 @@ GAME_ALIASES = {
     "جی تی ای": "gta",
     "جی تی ای 6": "gta6",
     "جی تی ای vi": "gta6",
+    "لایز اف پی": "liesofp",
+    "lies of p": "liesofp",
     "ویچر": "witcher",
     "دث استرندینگ": "deathstranding",
     "کالاف دیوتی": "callofduty",
@@ -163,7 +163,7 @@ class AIResult(BaseModel):
     explanation: str = Field(description="تحلیل و دلیل نهایی به زبان فارسی")
 
 # ============================================================
-# DATABASE SETUP & FEEDBACK TABLE [ایده ۴]
+# DATABASE SETUP & FEEDBACK TABLE
 # ============================================================
 
 def get_db():
@@ -191,7 +191,6 @@ def init_db():
             )
             """
         )
-        # [ایده ۴]: جدول ذخیره بازخورد و تصمیمات دستی ادمین برای آموزش Few-Shot
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS feedback (
@@ -253,7 +252,6 @@ def is_allowed(update: Update) -> bool:
         return False
     return user.id in get_db_admin_ids()
 
-# [ایده ۴]: ذخیره بازخورد ادمین
 def record_feedback(new_text: str, old_text: str, action: str):
     with get_db() as conn:
         conn.execute(
@@ -262,7 +260,6 @@ def record_feedback(new_text: str, old_text: str, action: str):
         )
         conn.commit()
 
-# [ایده ۴]: دریافت آخرین نمونه‌های بازخورد ادمین برای تزریق به پروامپت
 def get_few_shot_examples() -> str:
     with get_db() as conn:
         rows = conn.execute("SELECT new_text, old_text, admin_action FROM feedback ORDER BY id DESC LIMIT 3").fetchall()
@@ -270,7 +267,7 @@ def get_few_shot_examples() -> str:
         return ""
     examples = "\n\n[نمونه تصمیمات قبلی ادمین برای یادگیری الگوی تصمیم‌گیری]:\n"
     for r in rows:
-        action_desc = "تکراری نیست و باید ذخیره شود (خبر جدید یا تغییر آمار)" if r["admin_action"] == "force_saved" else "تکراری است و رد شد"
+        action_desc = "تکراری نیست و باید ذخیره شود" if r["admin_action"] == "force_saved" else "تکراری است و رد شد"
         examples += f"- خبر جدید: «{r['new_text'][:120]}...»\n  خبر آرشیو: «{r['old_text'][:120]}...»\n  تصمیم ادمین: {action_desc}\n\n"
     return examples
 
@@ -339,7 +336,7 @@ def extract_entities(text: str) -> Set[str]:
         return set()
     cleaned = clean_gaming_text(text)
     words = cleaned.split()
-    persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 3)
+    persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 2)
     eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{2,}\b', text))
     return persian_entities | eng_entities
 
@@ -405,7 +402,7 @@ def extract_title(text: str) -> str:
     return title[:600]
 
 # ============================================================
-# IMAGE HASHING & VISION OCR [ایده ۲]
+# IMAGE HASHING & VISION OCR
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
@@ -440,7 +437,6 @@ def hamming_distance(h1: str, h2: str) -> int:
         return 999
     return sum(c1 != c2 for c1, c2 in zip(h1, h2))
 
-# [ایده ۲]: استخراج تمام متن‌ها و مفاهیم بصری پوستر
 async def analyze_image_content(image_bytes: bytes) -> str:
     if not openai_client:
         return ""
@@ -469,7 +465,7 @@ async def analyze_image_content(image_bytes: bytes) -> str:
         return ""
 
 # ============================================================
-# HyDE & VECTOR SEARCH ENGINE [ایده ۳ - HyDE]
+# HyDE & VECTOR SEARCH ENGINE
 # ============================================================
 
 def sequence_similarity(a: str, b: str) -> float:
@@ -490,7 +486,6 @@ def text_similarity(a: str, b: str) -> float:
     jaccard = word_jaccard(a, b)
     return (seq * 0.50) + (jaccard * 0.50)
 
-# [ایده ۳]: تکنیک HyDE (ساخت چکیده موضوعی قبل از ایمبدینگ)
 async def generate_hyde_summary(text: str) -> str:
     if not openai_client:
         return text[:300]
@@ -512,7 +507,6 @@ async def make_embedding(text: str) -> Optional[List[float]]:
     if not openai_client:
         return None
     try:
-        # استفاده از چکیده HyDE برای بالا بردن دقت شباهت برداری
         hyde_text = await generate_hyde_summary(text)
         response = await openai_client.embeddings.create(
             model=EMBEDDING_MODEL,
@@ -539,7 +533,7 @@ def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]
     return [cosine_similarity(query_vector, v) for v in vectors]
 
 # ============================================================
-# TWO-STAGE AI COMPARATOR ENGINE [ایده ۳ و ایده ۴]
+# TWO-STAGE AI COMPARATOR ENGINE
 # ============================================================
 
 async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
@@ -552,20 +546,16 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
 شما موتوری فوق‌العاده حساس و دقیق برای تشخیص اخبار تکراری در رسانه گیمفا هستید.
 
 دستورالعمل‌های اصلی:
-۱. تطابق موضوعی (Subject Matching): اگر هر دو خبر درباره یک شخص/بازی/مصاحبه یکسان صحبت می‌کنند، duplicate = true است.
-۲. تغییر تیتر و بازنویسی (Paraphrasing): تغییر کلمات یا تیترها نباید باعث عبور خبر شود.
-۳. بررسی اعداد (Numerical Guard): اگر اعداد کلیدی (فروش، قیمت، تاریخ) تغییر کرده باشند، has_numerical_update را true بگذارید و match_type = "update_coverage" قرار دهید.
-۴. دسته‌بندی ارتباط:
-   - exact_duplicate: رویداد دقیقاً یکسان.
-   - update_coverage: آپدیت آمار، خبر یا مصاحبه قبلی.
-   - different_news: کاملاً دو خبر متفاوت.
+۱. تطابق موضوعی (Subject Matching): اگر هر دو خبر درباره یک شخص/بازی/مصاحبه/موضوع یکسان صحبت می‌کنند (حتی اگر کلمات متفاوت باشد مثل «می‌گویند» و «صحبت می‌کنند»)، duplicate = true است.
+۲. تغییر تیتر و بازنویسی (Paraphrasing): تغییر کلمات، خلاصه کردن متن یا تیتر زدن متفاوت نباید باعث عبور خبر شود.
+۳. بررسی اخبار کوتاه: حتی اگر خبر جدید در حد یک جمله کوتاه باشد اما مفهوم همان خبر قبلی را بگوید، حتما duplicate = true است.
+۴. بررسی اعداد (Numerical Guard): اگر اعداد کلیدی (فروش، قیمت، تاریخ) تغییر کرده باشند، has_numerical_update را true بگذارید و match_type = "update_coverage" قرار دهید.
 {few_shot_context}
 """
 
     user_prompt = f"[خبر جدید]:\n{new_text[:4000]}\n\n==================\n\n[خبر آرشیوی]:\n{old_text[:4000]}"
 
     try:
-        # مرحله ۱: تحلیل سریع و ارزان با gpt-4o-mini
         fast_response = await openai_client.beta.chat.completions.parse(
             model=FAST_AI_MODEL,
             messages=[
@@ -577,7 +567,6 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         )
         fast_result = fast_response.choices[0].message.parsed
 
-        # مرحله ۲: اگر پاسخ مرزی/مشکوک بود یا آپدیت عددی داشت، ارسال به gpt-4o برای تصمیم‌گیری نهایی
         if 0.45 <= fast_result.confidence <= 0.82 or fast_result.has_numerical_update:
             main_response = await openai_client.beta.chat.completions.parse(
                 model=AI_MODEL,
@@ -596,7 +585,7 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         return None
 
 # ============================================================
-# CANDIDATE SELECTION WITH TEMPORAL & NER GUARDS [ایده ۱]
+# CANDIDATE SELECTION WITH SHORT-TEXT BYPASS
 # ============================================================
 
 def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
@@ -612,6 +601,7 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
     clean_title = clean_gaming_text(new_title)
     new_meta = extract_metadata(new_text)
     now = datetime.now(timezone.utc)
+    is_short_input = len(clean_new.split()) < 15
 
     valid_vectors = []
     vector_row_indices = []
@@ -635,9 +625,8 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
         clean_old = row["normalized"]
         clean_old_title = clean_gaming_text(row["title"] or "")
 
-        # [ایده ۱]: جریمه زمانی اخبار قدیمی
-        created_at_str = row["created_at"]
         time_penalty = 1.0
+        created_at_str = row["created_at"]
         if created_at_str:
             try:
                 created_dt = datetime.strptime(created_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
@@ -654,10 +643,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
 
         ner_score = entity_overlap_score(new_text, old_text)
 
-        # [ایده ۱]: گارد سخت‌گیرانه عدم شباهت اسامی خاص
-        if ner_score < 0.15 and len(new_meta["entities"]) >= 2:
-            ner_score *= 0.1
-
         cross_title = 0.0
         if clean_title and (clean_title in clean_old or clean_old_title in clean_new):
             cross_title = 0.90
@@ -673,8 +658,12 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
 
         ranking = (((effective_title * 0.35) + (semantic * 0.35) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost) * time_penalty
 
+        # [تغییر کلیدی 1]: افزایش شدید ضریب رتبه‌بندی برای پیام‌های کوتاه با اشتراک اسامی خاص
         if ner_score >= 0.30:
-            ranking += 0.25
+            ranking += 0.35
+            
+        if is_short_input and ner_score >= 0.25:
+            ranking += 0.50
 
         candidates.append((ranking, semantic, lexical, ner_score, row))
 
@@ -686,7 +675,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
 # ============================================================
 
 async def check_duplicate(text: str, image_hash: Optional[str] = None, image_bytes: Optional[bytes] = None) -> Dict[str, Any]:
-    # [ایده ۲]: استخراج متن از تصویر در صورت کوتاه بودن پیام
     if image_bytes and len(text.split()) < 5:
         vision_text = await analyze_image_content(image_bytes)
         if vision_text:
@@ -698,7 +686,8 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     url = get_article_url(text)
     new_meta = extract_metadata(text)
 
-    required_conf = 0.60 if word_count >= 30 else 0.75
+    # [تغییر کلیدی 2]: حد آستانه حدس AI برای پیام‌های کوتاه سبک‌تر شد
+    required_conf = 0.55 if word_count < 15 else (0.60 if word_count >= 30 else 0.70)
 
     def fast_checks():
         with get_db() as conn:
@@ -706,7 +695,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
             if row:
                 return {"duplicate": True, "reason": "exact_hash", "confidence": 1.0, "row": row}
 
-            # [ایده ۱]: بررسی منبع خبر و لینک یکسان
             if url:
                 row = conn.execute("SELECT * FROM news WHERE url = ? LIMIT 1", (url,)).fetchone()
                 if row:
@@ -742,7 +730,9 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     embedding = await make_embedding(cleaned)
     candidates = await asyncio.to_thread(get_candidates_sync, text, embedding)
 
-    stage1_candidates = [c for c in candidates if c[0] >= 0.20][:3]
+    # [تغییر کلیدی 3]: پایین آوردن آستانه ورود کاندیداها به AI تا اخبار کوتاه حذف نشوند
+    min_threshold = 0.05 if word_count < 15 else 0.15
+    stage1_candidates = [c for c in candidates if c[0] >= min_threshold][:4]
 
     tasks = []
     candidate_meta = []
@@ -843,7 +833,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     welcome_text = (
-        "✨ <b>سامانه هوشمند پایش و تشخیص اخبار تکراری گیمفا v3.0</b>\n"
+        "✨ <b>سامانه هوشمند پایش و تشخیص اخبار تکراری گیمفا v3.1 (اصلاح شده)</b>\n"
         "─── • 💎 • ───\n\n"
         "مجهز به ۴ زیرسیستم ارتقایافته:\n"
         "🔹 <b>معماری دو مرحله‌ای AI:</b> سرعت بالا با gpt-4o-mini و دقت بالا با gpt-4o\n"
@@ -1081,7 +1071,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         old_text = context.user_data.get("matched_old_text", "")
 
         if text:
-            # [ایده ۴]: ذخیره بازخورد ادمین جهت یادگیری Few-Shot
             if old_text:
                 record_feedback(text, old_text, "force_saved")
 
@@ -1102,7 +1091,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = context.user_data.get("pending_news", "")
         old_text = context.user_data.get("matched_old_text", "")
         
-        # [ایده ۴]: ذخیره بازخورد رد خبر جهت یادگیری
         if text and old_text:
             record_feedback(text, old_text, "force_discarded")
 
@@ -1166,8 +1154,9 @@ def main():
         )
     )
 
-    logger.info("ربات ارتقایافته گیمفا نسخه 3.0 فعال شد...")
+    logger.info("ربات ارتقایافته گیمفا نسخه 3.1 (با پشتیبانی کامل از متن‌های کوتاه) فعال شد...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
+
