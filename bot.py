@@ -49,8 +49,10 @@ OWNER_ID = 8202357756
 DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
 ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "150"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
-MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "6"))
+
+# ارتقا به قوی‌ترین مدل هوش مصنوعی
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4o")
+MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))
 
 # ============================================================
 # GAMING ALIASES MAPPING
@@ -112,7 +114,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-logger = logging.getLogger("gamefa-engine")
+logger = logging.getLogger("gamefa-max-engine")
 
 # ============================================================
 # OPENAI ASYNC CLIENT
@@ -147,7 +149,7 @@ async def safe_edit_text(message, text: str, reply_markup=None, parse_mode: str 
         raise e
 
 # ============================================================
-# ENHANCED AI SCHEMA (Chain of Thought & Enums)
+# ADVANCED STRICT AI SCHEMA
 # ============================================================
 
 class MatchType(str, Enum):
@@ -156,13 +158,13 @@ class MatchType(str, Enum):
     DIFFERENT_NEWS = "different_news"
 
 class AIResult(BaseModel):
-    reasoning_step: str = Field(description="استدلال گام به گام تحلیل دو خبر و بررسی رویداد/مصاحبه مشترک")
-    news_a_core_entity: str = Field(description="نام بازی/شخص/کمپانی اصلی در خبر جدید")
-    news_b_core_entity: str = Field(description="نام بازی/شخص/کمپانی اصلی در خبر آرشیو")
-    match_type: MatchType = Field(description="نوع مطابقت خبر")
-    duplicate: bool = Field(description="آیا خبر تکراری یا پوشش موازی است؟")
-    confidence: float = Field(description="درصد اطمینان بین 0.0 تا 1.0")
-    explanation: str = Field(description="توضیح بسیار کوتاه و خلاصه علت تصمیم به فارسی")
+    subject_entity: str = Field(description="نام بازی، شخص، رسانه یا کمپانی اصلی خبر")
+    core_event_summary: str = Field(description="خلاصه رویداد، مصاحبه یا ادعای اصلی")
+    is_same_subject_and_event: bool = Field(description="آیا هر دو خبر درباره یک شخص/رویداد/مصاحبه/بازی یکسان صحبت می‌کنند؟")
+    match_type: MatchType = Field(description="دسته‌بندی دقیق ارتباط دو خبر")
+    duplicate: bool = Field(description="آیا خبر دوم باید به عنوان تکراری/موازی مسدود شود؟")
+    confidence: float = Field(description="میزان اطمینان بین 0.0 تا 1.0")
+    explanation: str = Field(description="تحلیل و دلیل نهایی به زبان فارسی (حداکثر دو جمله)")
 
 # ============================================================
 # DATABASE SETUP
@@ -409,7 +411,7 @@ def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]
     return [cosine_similarity(query_vector, v) for v in vectors]
 
 # ============================================================
-# VISION AI ANALYZER
+# VISION AI ANALYZER (GPT-4o Vision)
 # ============================================================
 
 async def analyze_image_content(image_bytes: bytes) -> str:
@@ -423,7 +425,7 @@ async def analyze_image_content(image_bytes: bytes) -> str:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "متن و موضوع اصلی گیمینگ موجود در این پوستر/تصویر را به اختصار بیان کن:"},
+                        {"type": "text", "text": "تمام متن‌ها، تیترها و موضوعات گیمینگ موجود در این پوستر/تصویر را به دقت استخراج و خلاصه کن:"},
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
@@ -431,7 +433,8 @@ async def analyze_image_content(image_bytes: bytes) -> str:
                     ]
                 }
             ],
-            max_tokens=300
+            temperature=0.0,
+            max_tokens=400
         )
         return response.choices[0].message.content or ""
     except Exception as e:
@@ -439,7 +442,7 @@ async def analyze_image_content(image_bytes: bytes) -> str:
         return ""
 
 # ============================================================
-# HIGHLY OPTIMIZED ADVANCED AI COMPARATOR
+# MAXIMUM ACCURACY AI COMPARATOR (Zero-Tolerance Policy)
 # ============================================================
 
 async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
@@ -447,29 +450,31 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         return None
 
     system_prompt = """
-شما سیستم تخصصی آنالیز اخبار رسانه گیمفا (Gamefa) هستید.
-وظیفه شما بررسی بسیار دقیق دو خبر برای تشخیص تکراری بودن یا پوشش موازی یک رویداد است.
+شما موتوری فوق‌العاده حساس و دقیق برای تشخیص اخبار تکراری در رسانه گیمفا هستید.
+دستورالعمل‌های بدون اغماض:
 
-راهنمای استدلال گام‌به‌گام (Chain of Thought):
-۱. ابتدا entityهای اصلی (نام بازی، نام بازیساز، کمپانی، کنسول، یا شخص) را مشخص کن.
-۲. بررسی کن آیا هر دو خبر به یک "مصاحبه"، "رویداد"، "واکنش"، "تیزر/تریلر"، "سیستم پیشنهادی" یا "توییت" یکسان اشاره دارند یا خیر.
-۳. در صورت یکسان بودن منبع یا موضوع (حتی اگر تیتر خبر اول جزیی‌تر و خبر دوم کلی‌تر باشد یا بازنویسی کامل شده باشد)، خبر تکراری/پوشش تکمیلی است.
+۱. تطابق موضوعی (Subject Matching):
+   - اگر هر دو خبر درباره نظر/واکنش/مصاحبه یک شخص خاص (مثلاً خالق یک بازی) درباره یک بازی/بتا/بخش چندنفره هستند، حتماً duplicate = true است.
+   - حتی اگر یکی از اخبار کوتاه و دیگری کامل‌تر باشد، خبر کوتاه، تکراری یا پوشش موازی محسوب می‌شود.
 
-قواعد تصمیم‌گیری:
-- match_type = "exact_duplicate": اگر دو خبر عیناً یک رویداد/مصاحبه/واکنش را پوشش می‌دهند.
-- match_type = "update_coverage": اگر خبر دوم مکمل، جزئیات بیشتر یا اخبار بعدی همان موضوع قبلی است.
-- match_type = "different_news": اگر دو خبر کاملاً به دو موضوع یا دو بازی/رویداد متفاوت مربوط هستند.
+۲. بازنویسی و تغییر تیتر (Paraphrasing):
+   - تغییر کلمات، خلاصه کردن، یا استفاده از مترادف‌ها در تیترها نباید باعث عبور خبر شود.
 
-* نکته مهم: اگر duplicate برابر true باشد، match_type نباید different_news باشد.
+۳. دسته‌بندی ارتباط:
+   - match_type = "exact_duplicate": موضوع و رویداد دقیقاً یکسان است.
+   - match_type = "update_coverage": خبر جدید، آپدیت یا تیتر دیگری از همان مصاحبه/رویداد قبلی است.
+   - match_type = "different_news": خبرها کاملاً به دو موضوع غیرمرتبط می‌پردازند.
+
+در صورت کوچک‌ترین شباهت در سوژه و منبع خبر، duplicate را true قرار دهید.
 """
 
     user_prompt = f"""
-[خبر جدید جهت بررسی]:
+[خبر جدید]:
 {new_text[:8000]}
 
-----------------------------------------
+========================================
 
-[خبر موجود در آرشیو]:
+[خبر آرشیوی]:
 {old_text[:8000]}
 """
 
@@ -480,15 +485,16 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
+            temperature=0.0,
             response_format=AIResult
         )
         return response.choices[0].message.parsed
     except Exception as e:
-        logger.exception("AI Compare Engine error: %s", e)
+        logger.exception("AI Engine Maximum Compare error: %s", e)
         return None
 
 # ============================================================
-# CANDIDATE SELECTION WITH HYBRID WEIGHTING
+# CANDIDATE SELECTION
 # ============================================================
 
 def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
@@ -548,8 +554,8 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
 
         ranking = ((effective_title * 0.35) + (semantic * 0.35) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
 
-        if ner_score >= 0.35:
-            ranking += 0.25
+        if ner_score >= 0.30:
+            ranking += 0.30
 
         candidates.append((ranking, semantic, lexical, ner_score, row))
 
@@ -592,7 +598,7 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
             for r in recent_rows:
                 overlap = entity_overlap_score(text, r["text"])
                 jaccard = word_jaccard(text, r["text"])
-                if overlap >= 0.75 and jaccard >= 0.50:
+                if overlap >= 0.70 and jaccard >= 0.45:
                     return {"duplicate": True, "reason": "near_exact_text", "confidence": 0.95, "row": r}
 
         return None
@@ -608,7 +614,7 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     candidate_meta = []
 
     for ranking, semantic, lexical, ner_score, row in candidates:
-        if ranking < 0.05:
+        if ranking < 0.01:
             continue
         tasks.append(ai_compare(text, row["text"]))
         candidate_meta.append((row, semantic, lexical, ranking))
@@ -630,7 +636,7 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
         if best_decision:
             conf, result, row = best_decision
             
-            if result.duplicate and (result.match_type == MatchType.UPDATE_COVERAGE or conf >= 0.65):
+            if result.duplicate and (result.match_type == MatchType.UPDATE_COVERAGE or conf >= 0.60):
                 return {
                     "duplicate": True,
                     "reason": "ai_update" if result.match_type == MatchType.UPDATE_COVERAGE else "ai_high_confidence",
@@ -639,7 +645,7 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
                     "explanation": result.explanation
                 }
             
-            if result.duplicate and conf >= 0.55:
+            if result.duplicate and conf >= 0.50:
                 return {
                     "duplicate": True,
                     "reason": "ai_ambiguous",
@@ -699,8 +705,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await safe_reply_text(
         update.message,
-        "🤖 <b>ربات هوشمند تشخیص خبر تکراری گیمفا (موتور ارتقایافته AI)</b>\n\n"
-        "متن یا تصویر خبر را جهت پردازش ارسال کنید:",
+        "🤖 <b>ربات تشخیص خبر تکراری گیمفا (موتور GPT-4o)</b>\n\n"
+        "متن یا تصویر خبر را ارسال کنید:",
         reply_markup=MAIN_KEYBOARD
     )
 
@@ -735,19 +741,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
         await safe_reply_text(
             update.message,
-            "ℹ️ <b>راهنمای ربات ارتقایافته:</b>\n\n"
-            "• تحلیل هوشمند به همراه Chain of Thought و استدلال گام به گام.\n"
-            "• تشخیص بازنویسی کامل، تفاوت‌های جزیی تیتر و پوشش مکمل اخبار."
+            "ℹ️ <b>راهنمای ربات:</b>\n\n"
+            "• مجهز به مدل GPT-4o با آستانه حساسیّت بسیار بالا.\n"
+            "• کوچک‌ترین تشابه در سوژه یا اخبار مکمل به سرعت شناسایی می‌شوند."
         )
         return
 
     elif text == "🧠 وضعیت AI":
-        status_ai = "🟢 فعال (نسخه پیشرفته Chain-of-Thought)" if openai_client else "🔴 غیرفعال"
+        status_ai = "🟢 فعال (GPT-4o Maximum Engine)" if openai_client else "🔴 غیرفعال"
         await safe_reply_text(
             update.message,
             f"🧠 <b>وضعیت موتور هوش مصنوعی:</b>\n\n"
             f"• وضعیت اتصال: {status_ai}\n"
-            f"• مدل پردازش: <code>{AI_MODEL}</code>\n"
+            f"• مدل اصلی: <code>{AI_MODEL}</code>\n"
             f"• مدل Embedding: <code>{EMBEDDING_MODEL}</code>"
         )
         return
@@ -773,7 +779,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📜 قوانین":
         await safe_reply_text(
             update.message,
-            "📜 <b>قوانین بررسی اخبار:</b>\n\nاخبار هم‌موضوع، هم‌رویداد و یا پوشش چندبخشی یک مصاحبه به‌طور خودکار تکراری تشخیص داده می‌شوند."
+            "📜 <b>قوانین بررسی اخبار:</b>\n\nهرگونه خبر موازی، خلاصه، یا مکمل یک رویداد بلافاصله غیرمجاز شناسایی می‌شود."
         )
         return
 
@@ -789,7 +795,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and not image_hash:
         return
 
-    status = await safe_reply_text(update.message, "🧠 در حال آنالیز هوشمند متنی و ساختاری خبر...")
+    status = await safe_reply_text(update.message, "⚡ در حال آنالیز فوق دقیق با موتور GPT-4o...")
 
     try:
         result = await check_duplicate(text, image_hash, image_bytes)
@@ -812,7 +818,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_text(
                     status,
                     f"ℹ️ <b>این خبر پوشش تکمیلی / بازنویسی خبر قبلی است</b>\n\n"
-                    f"🎯 اطمینان هوش مصنوعی: {conf:.1f}%\n"
+                    f"🎯 اطمینان AI: {conf:.1f}%\n"
                     f"💡 دلیل AI: {explanation}"
                     f"{old_preview}\n\n"
                     f"⛔ به عنوان خبر جدید ذخیره نشد."
@@ -824,7 +830,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_text(
                     status,
                     f"♻️ <b>خبر تکراری است</b>\n\n"
-                    f"🎯 اطمینان هوش مصنوعی: {conf:.1f}%\n"
+                    f"🎯 اطمینان AI: {conf:.1f}%\n"
                     f"💡 تحلیل AI: {explanation}"
                     f"{old_preview}\n\n"
                     f"⛔ خبر ذخیره نشد."
@@ -914,7 +920,7 @@ def main():
         )
     )
 
-    logger.info("ربات هوشمند گیمفا با موتور ارتقایافته هوش مصنوعی روشن شد...")
+    logger.info("ربات با موتور GPT-4o به طور کامل آماده به کار است...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
