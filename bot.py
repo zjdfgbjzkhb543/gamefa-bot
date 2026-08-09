@@ -29,10 +29,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # دریافت کلیدها از محیط (Environment Variables)
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN" # یا از os.getenv خوانده شود
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-AI_MODEL = "gpt-4o-mini" # یا gpt-4o
+AI_MODEL = "gpt-4o-mini"
 
 openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -87,7 +87,6 @@ def word_jaccard(text1: str, text2: str) -> float:
     return len(intersection) / len(union)
 
 def entity_overlap_score(text1: str, text2: str) -> float:
-    # استخراج ساده کلمات انگلیسی و کلمات خاص فارسی
     entities1 = set(re.findall(r'[A-Za-z0-9]+|[\u0600-\u06FF]{4,}', text1))
     entities2 = set(re.findall(r'[A-Za-z0-9]+|[\u0600-\u06FF]{4,}', text2))
     if not entities1 or not entities2:
@@ -176,10 +175,9 @@ def get_candidates_sync(text: str, top_k: int = 5):
             shared_events = new_events & set(old_meta.get("events", []))
             event_boost = 0.35 if (shared_events or has_structural) else 0.0
 
-            # محاسبه امتیاز رتبه‌بندی با ضریب رویداد
             ranking = (0.4 * semantic) + (0.2 * lexical) + (0.2 * ner_score) + event_boost
 
-            if ranking >= 0.08:  # آستانه پایین برای جلوگیری از ریزش اخبار مرتبط
+            if ranking >= 0.08:
                 candidates.append((ranking, semantic, lexical, ner_score, row))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -188,14 +186,11 @@ def get_candidates_sync(text: str, top_k: int = 5):
 async def check_duplicate(text: str, image_hash: Optional[str] = None, url: Optional[str] = None) -> dict:
     fingerprint = calculate_sha256(text)
     
-    # 1. بررسی‌های سریع و دقیق (Fast Checks)
     with get_db() as conn:
-        # بررسی هش دقیق متنی
         row = conn.execute("SELECT * FROM news WHERE sha256 = ? LIMIT 1", (fingerprint,)).fetchone()
         if row:
             return {"duplicate": True, "reason": "هش متن کاملاً یکسان است.", "confidence": 1.0, "row": row}
 
-        # بررسی هم‌پوشانی ساختاری بر اساس رویداد
         new_meta = extract_metadata(text)
         recent_rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT 100").fetchall()
         for r in recent_rows:
@@ -207,7 +202,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, url: Opti
             if overlap >= 0.75 or jaccard >= 0.50:
                 return {"duplicate": True, "reason": "تشابه متنی بسیار بالا.", "confidence": 0.95, "row": r}
 
-    # 2. دریافت کاندیداها و بررسی عمیق با AI
     candidates = get_candidates_sync(text)
     
     for ranking, semantic, lexical, ner_score, row in candidates:
@@ -220,7 +214,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, url: Opti
                 "row": row
             }
 
-    # 3. مکانیزم Fallback در صورت پاسخ ندادن AI
     if candidates:
         top_ranking, semantic, lexical, ner_score, top_row = candidates[0]
         if top_ranking >= 0.45:
@@ -267,8 +260,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or update.message.caption or ""
 
-    # تفکیک دقیق دکمه‌های منو
-    if text == "ℹ️ راهنما" or text == "📋 راهنما":
+    if text in ["ℹ️ راهنما", "📋 راهنما"]:
         await safe_reply_text(
             update.message,
             "ℹ️ <b>راهنمای استفاده از ربات:</b>\n\n"
@@ -293,7 +285,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # بررسی تکراری بودن خبر
     res = await check_duplicate(text)
     count = get_archive_count()
 
