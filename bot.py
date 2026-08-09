@@ -78,7 +78,7 @@ if OPENAI_API_KEY:
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # ============================================================
-# AI SCHEMA (ویژگی ۵: فیلد is_update اضافه شد)
+# AI SCHEMA
 # ============================================================
 
 class AIResult(BaseModel):
@@ -87,13 +87,13 @@ class AIResult(BaseModel):
     key_differences: str = Field(description="تفاوت‌های بنیادی")
     same_event: bool = Field(description="آیا رویداد خبری یا تیتر یکسان است؟")
     same_claim: bool = Field(description="آیا موضوع اصلی یکی است؟")
-    duplicate: bool = Field(description="آیا خبر تکراری است (حتی اگر یکی تیتر و دیگری متن کامل باشد)؟")
+    duplicate: bool = Field(description="آیا خبر تکراری است؟")
     is_update: bool = Field(description="آیا این خبر یک پوشش تکمیلی یا بروزرسانی خبر قبلی است؟")
     confidence: float = Field(description="اطمینان بین 0.0 تا 1.0")
     explanation: str = Field(description="توضیح کوتاه به فارسی")
 
 # ============================================================
-# DATABASE SETUP (پشتیبانی از image_hash)
+# DATABASE SETUP
 # ============================================================
 
 def get_db():
@@ -129,7 +129,7 @@ def init_db():
 # 1 & 2. GAMING PRE-PROCESSING & ENTITY EXTRACTION (NER)
 # ============================================================
 
-PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧۸۹", "01234567890123456789")
 
 BADGES_PATTERN = re.compile(
     r'\[(شایعه|رسمی|فوری|تحلیل|ویدیو|تکمیلی|اختصاصی|گیمفا|دانلود|تریلر)\]|'
@@ -139,36 +139,8 @@ BRANDING_PATTERN = re.compile(
     r'(@\w+|https?://\S+|t\.me/\S+|gamefa\.com\S*|رسانه گیمفا|گیمفا|Gamefa)', re.I
 )
 DECORATION_PATTERN = re.compile(
-    r'[-=_*~•▪️▫️🔹🔸🔻🔺🔴🟢🟡⚡️🔥💎📌📍📝📢📣💡]+'
+    r'[-=_*~•▪️▫️🔹🔸🔻🔺🔴🟢🟡⚡️🔥💎📌📍📝📢📣💡🎮🟣🆔]+'
 )
-
-def clean_gaming_text(text: str) -> str:
-    """پاک‌سازی اختصاصی متون رسانه گیمفا (حذف نویزها، برچسب‌ها و آیدی‌ها)"""
-    if not text:
-        return ""
-    text = BADGES_PATTERN.sub(" ", text)
-    text = BRANDING_PATTERN.sub(" ", text)
-    text = DECORATION_PATTERN.sub(" ", text)
-    return normalize(text)
-
-def extract_entities(text: str) -> set:
-    """استخراج موجودیت‌های کلیدی (اسامی انگلیسی، فرنچایزها، اعداد و واژگان خاص)"""
-    if not text:
-        return set()
-    # استخراج کلمات انگلیسی (که معمولاً نام بازی‌ها، استودیوها و افراد هستند)
-    eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{2,}\b', text))
-    # استخراج اعداد (تاریخ‌ها، شماره نسخه‌ها)
-    numbers = set(re.findall(r'\b\d+\b', text))
-    return eng_entities | numbers
-
-def entity_overlap_score(text1: str, text2: str) -> float:
-    """محاسبه میزان اشتراک کلمات کلیدی و موجودیت‌ها"""
-    e1 = extract_entities(text1)
-    e2 = extract_entities(text2)
-    if not e1 or not e2:
-        return 0.0
-    intersection = e1 & e2
-    return len(intersection) / min(len(e1), len(e2))
 
 def normalize(text: str) -> str:
     if not text:
@@ -185,6 +157,32 @@ def normalize(text: str) -> str:
     text = re.sub(r"[^\w\s\u0600-\u06ff]", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text)
     return text.strip().lower()
+
+def clean_gaming_text(text: str) -> str:
+    """پاک‌سازی اختصاصی متون رسانه گیمفا"""
+    if not text:
+        return ""
+    text = BADGES_PATTERN.sub(" ", text)
+    text = BRANDING_PATTERN.sub(" ", text)
+    text = DECORATION_PATTERN.sub(" ", text)
+    return normalize(text)
+
+def extract_entities(text: str) -> set:
+    """استخراج موجودیت‌های کلیدی (اسامی انگلیسی و اعداد)"""
+    if not text:
+        return set()
+    eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{2,}\b', text))
+    numbers = set(re.findall(r'\b\d+\b', text))
+    return eng_entities | numbers
+
+def entity_overlap_score(text1: str, text2: str) -> float:
+    """محاسبه میزان اشتراک موجودیت‌های کلیدی"""
+    e1 = extract_entities(text1)
+    e2 = extract_entities(text2)
+    if not e1 or not e2:
+        return 0.0
+    intersection = e1 & e2
+    return len(intersection) / min(len(e1), len(e2))
 
 def sha256_hash(text: str) -> str:
     return hashlib.sha256(clean_gaming_text(text).encode("utf-8")).hexdigest()
@@ -221,11 +219,11 @@ def extract_title(text: str) -> str:
     return title[:600]
 
 # ============================================================
-# 6. IMAGE PERCEPTUAL HASHING (pHash/dHash)
+# 6. IMAGE PERCEPTUAL HASHING (dHash)
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
-    """محاسبه هش تفاوت تصاویر (dHash) برای تشخیص کاورهای تکراری"""
+    """محاسبه هش تفاوت تصاویر (dHash)"""
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert('L').resize((9, 8), Image.Resampling.LANCZOS)
         pixels = list(image.getdata())
@@ -249,7 +247,7 @@ def compute_image_hash(image_bytes: bytes) -> str:
         return ""
 
 def hamming_distance(h1: str, h2: str) -> int:
-    """محاسبه فاصله همینگ برای مقایسه شباهت دو هش تصویر"""
+    """محاسبه فاصله همینگ برای هش تصاویر"""
     if not h1 or not h2 or len(h1) != len(h2):
         return 999
     return sum(c1 != c2 for c1, c2 in zip(h1, h2))
@@ -314,24 +312,24 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
 قوانین تحلیل:
 ۱. اگر یکی از متن‌ها فقط "تیتر کوتاه" و دیگری "متن کامل" همان خبر باشد -> duplicate: true.
 ۲. اگر خبر دوم بروزرسانی یا اعلام قیمت/تاریخ بعد از خبر اول باشد -> duplicate: true, is_update: true.
-۳. اگر دو خبر درباره یک بازی یکسان اما دو رویداد مجزا باشند (مثلاً یکی نقد بازی و دیگری فروش آن) -> duplicate: false.
+۳. اگر دو خبر درباره یک بازی یکسان اما دو رویداد مجزا باشند -> duplicate: false.
 
 نمونه‌های الگو (Few-Shot Examples):
 
 نمونه ۱:
 خبر A: "جان کارمک پس از سال‌ها دوباره Doom را تجربه کرد"
 خبر B: "جان کارمک هم‌بنیان‌گذار id Software در جریان رویداد QuakeCon نسخه کلاسیک Doom را بازی کرد..."
-نتیجه: duplicate = true, is_update = false (خبر دوم متن کامل همان تیتر است).
+نتیجه: duplicate = true, is_update = false.
 
 نمونه ۲:
 خبر A: "کنسول پلی‌استیشن ۵ پرو رسماً معرفی شد"
 خبر B: "قیمت و تاریخ عرضه پلی‌استیشن ۵ پرو مشخص شد"
-نتیجه: duplicate = true, is_update = true (خبر B پوشش تکمیلی/بروزرسانی خبر A است).
+نتیجه: duplicate = true, is_update = true.
 
 نمونه ۳:
 خبر A: "بازی GTA VI در سال ۲۰۲۵ منتشر می‌شود"
 خبر B: "تریلر دوم بازی GTA VI رکورد یوتیوب را شکست"
-نتیجه: duplicate = false, is_update = false (دو رویداد مجزا درباره یک بازی).
+نتیجه: duplicate = false, is_update = false.
 """
 
     user_prompt = f"""
@@ -378,21 +376,16 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
         clean_old = row["normalized"]
         clean_old_title = clean_gaming_text(row["title"] or "")
 
-        # ۱. شباهت متنی و تیتری
         lexical = text_similarity(new_text, old_text)
         title_score = sequence_similarity(new_title, row["title"] or "")
-
-        # ۲. شباهت موجودیت‌های کلیدی (NER Score)
         ner_score = entity_overlap_score(new_text, old_text)
 
-        # ۳. تطابق تیتر و متن
         cross_title = 0.0
         if clean_title and (clean_title in clean_old or clean_old_title in clean_new):
             cross_title = 0.90
 
         effective_title = max(title_score, cross_title)
 
-        # ۴. شباهت برداری (Embedding)
         semantic = 0.0
         if new_embedding and row["embedding"]:
             try:
@@ -401,14 +394,13 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
             except Exception:
                 semantic = 0.0
 
-        # ۵. وزن‌دهی زمانی (Temporal Decay): اخبار زیر ۴۸ ساعت اولویت بالاتری دارند
         time_multiplier = 1.0
         if row["created_at"]:
             try:
                 created_dt = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                 hours_diff = (now - created_dt).total_seconds() / 3600.0
                 if hours_diff <= 48:
-                    time_multiplier = 1.25  # ۲۵ درصد افزایش شانس بررسی برای اخبار جدید
+                    time_multiplier = 1.25
             except Exception:
                 pass
 
@@ -430,31 +422,42 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None) -> Dict[s
 
     def fast_checks():
         with get_db() as conn:
-            # بررسی ۱: هش دقیق متن
+            # ۱. بررسی هش دقیق متن
             row = conn.execute("SELECT * FROM news WHERE sha256 = ? LIMIT 1", (fingerprint,)).fetchone()
             if row:
                 return {"duplicate": True, "reason": "exact_hash", "confidence": 1.0, "row": row}
 
-            # بررسی ۲: لینک یکسان خبر
+            # ۲. بررسی لینک یکسان خبر
             if url:
                 row = conn.execute("SELECT * FROM news WHERE url = ? LIMIT 1", (url,)).fetchone()
                 if row:
                     return {"duplicate": True, "reason": "exact_url", "confidence": 1.0, "row": row}
 
-            # بررسی ۳: کاور یکسان تصویر (Image Hash)
+            # ۳. بررسی کاور یکسان تصویر (Image Hash)
             if image_hash:
                 img_rows = conn.execute("SELECT * FROM news WHERE image_hash IS NOT NULL AND image_hash != '' ORDER BY id DESC LIMIT 50").fetchall()
                 for r in img_rows:
                     dist = hamming_distance(image_hash, r["image_hash"])
-                    if dist <= 6:  # شباهت تصویر بسیار بالا
+                    if dist <= 6:
                         return {"duplicate": True, "reason": "image_match", "confidence": 0.95, "row": r}
 
-            # بررسی ۴: تیتر کاملاً یکسان
+            # ۴. بررسی شباهت آستانه‌ای تیترها (Fuzzy Title Matching)
+            # این لایه جلوی کپی‌های همراه با تغییرات جزیی کلمات را می‌گیرد
             rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT ?", (ARCHIVE_SIZE,)).fetchall()
             clean_t = clean_gaming_text(title)
-            for r in rows:
-                if clean_t and clean_gaming_text(r["title"] or "") == clean_t:
-                    return {"duplicate": True, "reason": "title_exact_match", "confidence": 0.98, "row": r}
+
+            if clean_t:
+                for r in rows:
+                    old_title = clean_gaming_text(r["title"] or "")
+                    if old_title:
+                        title_sim = SequenceMatcher(None, clean_t, old_title).ratio()
+                        if title_sim >= 0.80:
+                            return {
+                                "duplicate": True,
+                                "reason": "fuzzy_title_match",
+                                "confidence": title_sim,
+                                "row": r
+                            }
 
         return None
 
@@ -491,7 +494,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None) -> Dict[s
         if best_decision:
             conf, result, row = best_decision
             
-            # ویژگی ۵: تشخیص هوشمند بروزرسانی خبر
             if result.duplicate and result.is_update and conf >= 0.70:
                 return {"duplicate": True, "reason": "ai_update", "confidence": conf, "row": row, "explanation": result.explanation}
                 
@@ -556,7 +558,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").strip()
     photo = update.message.photo
 
-    # منوی اصلی کیبورد
     if text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
         with get_db() as conn:
             total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
@@ -573,7 +574,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     image_hash = None
-    # پردازش تصویر در صورت وجود (ویژگی ۶)
     if photo:
         file = await context.bot.get_file(photo[-1].file_id)
         img_bytes = await file.download_as_bytearray()
@@ -597,6 +597,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if reason in ["exact_hash", "exact_url", "near_exact_text", "title_exact_match"]:
                 await status.edit_text("♻️ *خبر کاملاً تکراری است* (اطمینان ۱۰۰٪)\n\n⛔ خبر ذخیره نشد.", parse_mode="Markdown")
+                return
+
+            elif reason == "fuzzy_title_match":
+                await status.edit_text(f"♻️ *خبر تکراری است* (شباهت تیتر: {conf:.1f}%)\n\n⛔ خبر ذخیره نشد.", parse_mode="Markdown")
                 return
 
             elif reason == "image_match":
@@ -696,3 +700,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
