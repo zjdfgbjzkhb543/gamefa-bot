@@ -15,6 +15,10 @@ from typing import Optional, List, Dict, Any, Tuple
 from difflib import SequenceMatcher
 
 from PIL import Image
+import matplotlib
+matplotlib.use('Agg')  # حالت غیرتعاملی برای سرور
+import matplotlib.pyplot as plt
+
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
@@ -23,7 +27,9 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
-    KeyboardButton
+    KeyboardButton,
+    InlineQueryResultArticle,
+    InputTextMessageContent
 )
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -31,6 +37,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    InlineQueryHandler,
     ContextTypes,
     filters,
 )
@@ -42,72 +49,20 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-# شناسه ادمین‌ها (می‌توانید چندین آیدی را با کاما جدا کنید مثلاً "123,456")
+# شناسه ادمین‌ها (لیست جدا شده با کاما)
 ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_ID", "0").split(",") if i.strip().isdigit()]
 
-# شناسه انحصاری مالك اصلی (فقط این آیدی حق پاکسازی آرشیو را دارد)
-OWNER_ID = 8202357756
+# شناسه انحصاری مالك اصلی (فقط این آیدی حق پاکسازی و دریافت بک‌آپ را دارد)
+OWNER_ID = int(os.getenv("OWNER_ID", "8202357756"))
 
 DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
-ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "150"))
+ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "500"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "5"))
 
 # ============================================================
-# GAMING ALIASES MAPPING
-# ============================================================
-
-GAME_ALIASES = {
-    "ps5": "playstation5",
-    "پلی استیشن 5": "playstation5",
-    "پلی استیشن ۵": "playstation5",
-    "ps4": "playstation4",
-    "پلی استیشن 4": "playstation4",
-    "پلی استیشن ۴": "playstation4",
-    "xbox series x": "xboxseriesx",
-    "ایکس باکس سری ایکس": "xboxseriesx",
-    "xbox series s": "xboxseriess",
-    "ایکس باکس سری اس": "xboxseriess",
-    "xbox": "xbox",
-    "ایکس باکس": "xbox",
-    "pc": "کامپیوتر",
-    "پی سی": "کامپیوتر",
-    "راک استار": "rockstar",
-    "راکستار": "rockstar",
-    "جی تی ای": "gta",
-    "جی تی ای 6": "gta6",
-    "جی تی ای vi": "gta6",
-    "ویچر": "witcher",
-    "دث استرندینگ": "deathstranding",
-    "کالاف دیوتی": "callofduty",
-    "کال آف دیوتی": "callofduty",
-    "سونی": "sony",
-    "مایکروسافت": "microsoft",
-    "نینتندو": "nintendo",
-}
-
-EVENT_TYPES = [
-    "سیستم پیشنهادی", "سیستم مورد نیاز", "تاریخ انتشار", "تریلر",
-    "ویدیو", "تاخیر", "شایعه", "کد تخفیف", "آپدیت", "پچ", "قیمت", "فروش", "مدت زمان"
-]
-
-# ============================================================
-# MAIN REPLY KEYBOARD LAYOUT
-# ============================================================
-
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("🔍 بررسی خبر جدید"), KeyboardButton("📊 آمار آرشیو")],
-        [KeyboardButton("🧠 وضعیت AI"), KeyboardButton("📋 راهنما"), KeyboardButton("📦 وضعیت دیتابیس")],
-        [KeyboardButton("⚙️ تنظیمات"), KeyboardButton("💬 پشتیبانی"), KeyboardButton("👥 ادمین‌ها"), KeyboardButton("📜 قوانین")],
-        [KeyboardButton("🗑 پاکسازی کامل آرشیو")]
-    ],
-    resize_keyboard=True
-)
-
-# ============================================================
-# LOGGING
+# LOGGING SETUP
 # ============================================================
 
 logging.basicConfig(
@@ -125,7 +80,58 @@ if OPENAI_API_KEY:
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # ============================================================
-# SAFE TELEGRAM MESSAGE SENDER (PREVENT ENTITY PARSE ERRORS)
+# MAPPING & CONSTANTS
+# ============================================================
+
+GAME_ALIASES = {
+    "ps5": "playstation5",
+    "پلی استیشن 5": "playstation5",
+    "پلی استیشن ۵": "playstation5",
+    "ps4": "playstation4",
+    "پلی استیشن 4": "playstation4",
+    "xbox series x": "xboxseriesx",
+    "ایکس باکس سری ایکس": "xboxseriesx",
+    "pc": "کامپیوتر",
+    "پی سی": "کامپیوتر",
+    "راک استار": "rockstar",
+    "راکستار": "rockstar",
+    "جی تی ای": "gta",
+    "جی تی ای 6": "gta6",
+    "کالاف دیوتی": "callofduty",
+    "سونی": "sony",
+    "مایکروسافت": "microsoft",
+    "نینتندو": "nintendo",
+}
+
+EVENT_TYPES = [
+    "سیستم پیشنهادی", "سیستم مورد نیاز", "تاریخ انتشار", "تریلر",
+    "ویدیو", "تاخیر", "شایعه", "کد تخفیف", "آپدیت", "پچ", "قیمت", "فروش", "مدت زمان"
+]
+
+PERSIAN_STOPWORDS = {
+    "در", "یک", "از", "به", "با", "که", "را", "روی", "بر", "برای", "شد", "کرد",
+    "است", "بود", "این", "آن", "هم", "نیز", "تا", "چون", "باید", "ستاره",
+    "جدید", "اعلام", "انتشار", "تاریخ", "تریلر", "پوستر", "ویدیو", "تصویر",
+    "عکس", "دانلود", "تماشا", "کنید", "رسما", "رسمی", "شایعه", "تایید",
+    "پوشش", "اخبار", "خبر", "وجود", "داد"
+}
+
+# ============================================================
+# MAIN REPLY KEYBOARD LAYOUT
+# ============================================================
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("🔍 بررسی خبر جدید"), KeyboardButton("📈 آمار تصویری")],
+        [KeyboardButton("🧠 وضعیت AI"), KeyboardButton("📋 راهنما"), KeyboardButton("📦 وضعیت دیتابیس")],
+        [KeyboardButton("📜 لاگ ادمین‌ها"), KeyboardButton("💾 دریافت بک‌آپ"), KeyboardButton("👥 ادمین‌ها")],
+        [KeyboardButton("🗑 پاکسازی کامل آرشیو")]
+    ],
+    resize_keyboard=True
+)
+
+# ============================================================
+# SAFE TELEGRAM MESSAGE SENDER
 # ============================================================
 
 async def safe_reply_text(message, text: str, reply_markup=None, parse_mode: str = "HTML"):
@@ -149,22 +155,7 @@ async def safe_edit_text(message, text: str, reply_markup=None, parse_mode: str 
         raise e
 
 # ============================================================
-# AI SCHEMA
-# ============================================================
-
-class AIResult(BaseModel):
-    news_a_core: str = Field(description="حقایق کلیدی خبر جدید")
-    news_b_core: str = Field(description="حقایق کلیدی خبر آرشیوی")
-    key_differences: str = Field(description="تفاوت‌های بنیادی")
-    same_event: bool = Field(description="آیا رویداد خبری یا تیتر یکسان است؟")
-    same_claim: bool = Field(description="آیا موضوع اصلی یکی است؟")
-    duplicate: bool = Field(description="آیا خبر تکراری است؟")
-    is_update: bool = Field(description="آیا این خبر یک پوشش تکمیلی یا بروزرسانی خبر قبلی است؟")
-    confidence: float = Field(description="اطمینان بین 0.0 تا 1.0")
-    explanation: str = Field(description="توضیح کوتاه به فارسی")
-
-# ============================================================
-# DATABASE SETUP
+# DATABASE SETUP & AUDIT LOG
 # ============================================================
 
 def get_db():
@@ -191,35 +182,55 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT,
+                details TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sha256 ON news(sha256)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_url ON news(url)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_image_hash ON news(image_hash)")
         conn.commit()
 
+def log_audit(user_id: int, action: str, details: str = ""):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO audit_logs (user_id, action, details) VALUES (?, ?, ?)",
+            (user_id, action, details)
+        )
+        conn.commit()
+
 # ============================================================
-# PERSIAN GAMING PRE-PROCESSING & STOPWORDS
+# AI SCHEMAS (DUPLICATE CHECK & CONTENT ASSISTANT)
+# ============================================================
+
+class AIResult(BaseModel):
+    news_a_core: str = Field(description="حقایق کلیدی خبر جدید")
+    news_b_core: str = Field(description="حقایق کلیدی خبر آرشیوی")
+    key_differences: str = Field(description="تفاوت‌های بنیادی")
+    same_event: bool = Field(description="آیا رویداد خبری یا تیتر یکسان است؟")
+    same_claim: bool = Field(description="آیا موضوع اصلی یکی است؟")
+    duplicate: bool = Field(description="آیا خبر تکراری است؟")
+    is_update: bool = Field(description="آیا این خبر یک پوشش تکمیلی یا بروزرسانی خبر قبلی است؟")
+    confidence: float = Field(description="اطمینان بین 0.0 تا 1.0")
+    explanation: str = Field(description="توضیح کوتاه به فارسی")
+
+class AIContentAssistant(BaseModel):
+    rewritten_text: str = Field(description="پیش‌نویس بازنویسی شده با لحن جذاب رسانه گیمفا")
+    hashtags: List[str] = Field(description="لیست هشتگ‌های پیشنهادی مرتبط مانند #PS5")
+    urgency_level: str = Field(description="سطح اهمیت خبر: فوری / مهم / عادی")
+
+# ============================================================
+# TEXT PROCESSING & EMBEDDING
 # ============================================================
 
 PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-
-BADGES_PATTERN = re.compile(
-    r'\[(شایعه|رسمی|فوری|تحلیل|ویدیو|تکمیلی|اختصاصی|گیمفا|دانلود|تریلر)\]|'
-    r'#(شایعه|رسمی|فوری|گیمفا|خبر)', re.I
-)
-BRANDING_PATTERN = re.compile(
-    r'(@\w+|https?://\S+|t\.me/\S+|gamefa\.com\S*|رسانه گیمفا|گیمفا|Gamefa)', re.I
-)
-DECORATION_PATTERN = re.compile(
-    r'[-=_*~•▪️▫️🔹🔸🔻🔺🔴🟢🟡⚡️🔥💎📌📍📝📢📣💡🎮🟣🆔]+'
-)
-
-PERSIAN_STOPWORDS = {
-    "در", "یک", "از", "به", "با", "که", "را", "روی", "بر", "برای", "شد", "کرد",
-    "است", "بود", "این", "آن", "هم", "نیز", "تا", "چون", "باید", "ستاره",
-    "جدید", "اعلام", "انتشار", "تاریخ", "تریلر", "پوستر", "ویدیو", "تصویر",
-    "عکس", "دانلود", "تماشا", "کنید", "رسما", "رسمی", "شایعه", "تایید",
-    "پوشش", "اخبار", "خبر", "وجود", "داد"
-}
 
 def normalize(text: str) -> str:
     if not text:
@@ -232,7 +243,6 @@ def normalize(text: str) -> str:
     text = text.replace("\u200c", " ")
     text = re.sub(r"https?://\S+", " ", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"[\U00010000-\U0010ffff]", " ", text)
     text = re.sub(r"[^\w\s\u0600-\u06ff]", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text).strip().lower()
 
@@ -244,87 +254,42 @@ def normalize(text: str) -> str:
 def clean_gaming_text(text: str) -> str:
     if not text:
         return ""
-    text = BADGES_PATTERN.sub(" ", text)
-    text = BRANDING_PATTERN.sub(" ", text)
-    text = DECORATION_PATTERN.sub(" ", text)
+    text = re.sub(r'\[(شایعه|رسمی|فوری|تحلیل|ویدیو|تکمیلی|اختصاصی|گیمفا|دانلود|تریلر)\]', ' ', text)
+    text = re.sub(r'(@\w+|https?://\S+|t\.me/\S+|gamefa\.com\S*|رسانه گیمفا|گیمفا)', ' ', text, flags=re.I)
     return normalize(text)
-
-# ============================================================
-# METADATA EXTRACTION & ENTITY MATCHING
-# ============================================================
-
-def extract_metadata(text: str) -> Dict[str, Any]:
-    cleaned = clean_gaming_text(text)
-    found_events = [event for event in EVENT_TYPES if event in cleaned]
-    entities = extract_entities(text)
-    return {
-        "events": found_events,
-        "entities": entities
-    }
-
-def extract_entities(text: str) -> set:
-    if not text:
-        return set()
-    cleaned = clean_gaming_text(text)
-    words = cleaned.split()
-    
-    persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 2)
-    eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{1,}\b', text))
-    
-    return persian_entities | eng_entities
-
-def entity_overlap_score(text1: str, text2: str) -> float:
-    e1 = extract_entities(text1)
-    e2 = extract_entities(text2)
-    if not e1 or not e2:
-        return 0.0
-    intersection = e1 & e2
-    return len(intersection) / min(len(e1), len(e2))
-
-def token_overlap_ratio(text1: str, text2: str) -> float:
-    words1 = extract_entities(text1)
-    words2 = extract_entities(text2)
-    if not words1 or not words2:
-        return 0.0
-    intersection = words1 & words2
-    return len(intersection) / max(len(words1), len(words2))
 
 def sha256_hash(text: str) -> str:
     return hashlib.sha256(clean_gaming_text(text).encode("utf-8")).hexdigest()
-
-URL_PATTERN = re.compile(r"https?://[^\s<>\]\)\"']+", re.I)
-
-def extract_urls(text: str) -> List[str]:
-    if not text:
-        return []
-    urls = [url.rstrip(".,،؛!?؟") for url in URL_PATTERN.findall(text)]
-    return list(dict.fromkeys(urls))
-
-def normalize_url(url: str) -> str:
-    url = url.strip().rstrip("/")
-    url = re.sub(r"[?&]utm_[^&]+", "", url, flags=re.I)
-    return url.lower()
-
-def get_article_url(text: str) -> str:
-    urls = extract_urls(text)
-    if not urls:
-        return ""
-    for url in urls:
-        if "gamefa.com" in url.lower():
-            return normalize_url(url)
-    return normalize_url(urls[0])
 
 def extract_title(text: str) -> str:
     if not text:
         return ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    title = re.sub(r"^[^\w\u0600-\u06ff]+", "", lines[0], flags=re.UNICODE)
-    return title[:600]
+    return lines[0][:600] if lines else ""
+
+async def make_embedding(text: str) -> Optional[List[float]]:
+    if not openai_client:
+        return None
+    try:
+        response = await openai_client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=clean_gaming_text(text)[:10000]
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logger.exception("Embedding API error: %s", e)
+        return None
+
+def cosine_similarity(v1: List[float], v2: List[float]) -> float:
+    if not v1 or not v2 or len(v1) != len(v2):
+        return 0.0
+    dot = sum(a * b for a, b in zip(v1, v2))
+    norm_v1 = math.sqrt(sum(a * a for a in v1))
+    norm_v2 = math.sqrt(sum(b * b for b in v2))
+    return dot / (norm_v1 * norm_v2) if norm_v1 and norm_v2 else 0.0
 
 # ============================================================
-# ROBUST IMAGE PERCEPTUAL HASHING
+# OCR & IMAGE HASHING
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
@@ -338,9 +303,8 @@ def compute_image_hash(image_bytes: bytes) -> str:
         difference = []
         for row in range(8):
             for col in range(8):
-                pixel_left = pixels[row * 9 + col]
-                pixel_right = pixels[row * 9 + col + 1]
-                difference.append(pixel_left > pixel_right)
+                difference.append(pixels[row * 9 + col] > pixels[row * 9 + col + 1])
+        
         decimal_value = 0
         hex_string = []
         for index, value in enumerate(difference):
@@ -359,61 +323,7 @@ def hamming_distance(h1: str, h2: str) -> int:
         return 999
     return sum(c1 != c2 for c1, c2 in zip(h1, h2))
 
-# ============================================================
-# VECTOR SEARCH & PURE PYTHON MATH
-# ============================================================
-
-def sequence_similarity(a: str, b: str) -> float:
-    a, b = clean_gaming_text(a), clean_gaming_text(b)
-    if not a or not b:
-        return 0.0
-    return SequenceMatcher(None, a, b).ratio()
-
-def word_jaccard(a: str, b: str) -> float:
-    set_a = extract_entities(a)
-    set_b = extract_entities(b)
-    if not set_a or not set_b:
-        return 0.0
-    return len(set_a & set_b) / len(set_a | set_b)
-
-def text_similarity(a: str, b: str) -> float:
-    seq = sequence_similarity(a, b)
-    jaccard = word_jaccard(a, b)
-    return (seq * 0.50) + (jaccard * 0.50)
-
-async def make_embedding(text: str) -> Optional[List[float]]:
-    if not openai_client:
-        return None
-    try:
-        response = await openai_client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=clean_gaming_text(text)[:10000]
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.exception("Embedding API error: %s", e)
-        return None
-
-def cosine_similarity(v1: List[float], v2: List[float]) -> float:
-    if not v1 or not v2 or len(v1) != len(v2):
-        return 0.0
-    dot_product = sum(a * b for a, b in zip(v1, v2))
-    norm_v1 = math.sqrt(sum(a * a for a in v1))
-    norm_v2 = math.sqrt(sum(b * b for b in v2))
-    if norm_v1 == 0 or norm_v2 == 0:
-        return 0.0
-    return dot_product / (norm_v1 * norm_v2)
-
-def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]]) -> List[float]:
-    if not vectors or not query_vector:
-        return []
-    return [cosine_similarity(query_vector, v) for v in vectors]
-
-# ============================================================
-# VISION AI FOR SHORT TEXT
-# ============================================================
-
-async def analyze_image_content(image_bytes: bytes) -> str:
+async def extract_ocr_text(image_bytes: bytes) -> str:
     if not openai_client:
         return ""
     try:
@@ -424,247 +334,167 @@ async def analyze_image_content(image_bytes: bytes) -> str:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "متن و موضوع اصلی موجود در این تصویر خبری گیمینگ را به صورت خلاصه توضیح بده:"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                        }
+                        {"type": "text", "text": "تمام متن‌های موجود در این تصویر خبری گیمینگ را دقیقاً استخراج کن و موضوع آن را شرح بده:"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
             ],
-            max_tokens=300
+            max_tokens=400
         )
         return response.choices[0].message.content or ""
     except Exception as e:
-        logger.error("Vision AI error: %s", e)
+        logger.error("Vision OCR error: %s", e)
         return ""
 
 # ============================================================
-# FEW-SHOT PROMPTING AI JUDGE
+# AI GENERATIVE REWRITE & HASHTAGS
+# ============================================================
+
+async def generate_ai_assistant_content(text: str) -> Optional[AIContentAssistant]:
+    if not openai_client:
+        return None
+    try:
+        response = await openai_client.beta.chat.completions.parse(
+            model=AI_MODEL,
+            messages=[
+                {"role": "system", "content": "تو دستیار سردبیری رسانه گیمفا هستی. برای این خبر یک بازنویسی جذاب با لحن اختصاصی، هشتگ‌های کلیدی و سطح اهمیت آن را مشخص کن."},
+                {"role": "user", "content": text[:4000]}
+            ],
+            response_format=AIContentAssistant
+        )
+        return response.choices[0].message.parsed
+    except Exception as e:
+        logger.error("AI Assistant Generation error: %s", e)
+        return None
+
+# ============================================================
+# AI COMPARE (DUPLICATE CHECK)
 # ============================================================
 
 async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
     if not openai_client:
         return None
-
-    system_prompt = """
-تو موتور هوشمند تشخیص اخبار تکراری رسانه گیمفا هستی.
-تکلیف: تشخیص بده آیا این دو خبر مربوط به یک موضوع/رویداد یکسان هستند یا خیر.
-
-قوانین تشخیص:
-۱. بازنویسی تیترها (Paraphrasing): اگر دو خبر یک ادعا یا رویداد واحد را با کلمات یا افعال متفاوت بیان می‌کنند، این اخبار ۱۰۰٪ تکراری هستند.
-۲. اسامی و اعداد: اگر نام شرکت/بازی و عدد کلیدی خبر یکسان باشد (مثلاً THQ Nordic و ۱۲ بازی)، حتماً تکراری است.
-"""
-
-    user_prompt = f"""
-خبر جدید:
-----------------
-{new_text[:8000]}
-----------------
-خبر آرشیوی:
-----------------
-{old_text[:8000]}
-----------------
-"""
     try:
         response = await openai_client.beta.chat.completions.parse(
             model=AI_MODEL,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "system", "content": "آیا این دو خبر مربوط به یک موضوع یا رویداد خبری یکسان هستند؟ بازنویسی کلمات همچنان خبر را تکراری می‌سازد."},
+                {"role": "user", "content": f"خبر جدید:\n{new_text[:4000]}\n\nخبر آرشیو:\n{old_text[:4000]}"}
             ],
             response_format=AIResult
         )
         return response.choices[0].message.parsed
     except Exception as e:
-        logger.exception("AI Reasoning error: %s", e)
+        logger.error("AI Compare error: %s", e)
         return None
 
 # ============================================================
-# CANDIDATES SELECTION
+# VISUAL ANALYTICS (MATPLOTLIB CHART)
 # ============================================================
 
-def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
+def generate_analytics_chart_bytes() -> io.BytesIO:
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT ?", (ARCHIVE_SIZE,)).fetchall()
+        total_news = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
+        total_logs = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
+        saves = conn.execute("SELECT COUNT(*) FROM audit_logs WHERE action = 'FORCE_SAVE'").fetchone()[0]
+        discards = conn.execute("SELECT COUNT(*) FROM audit_logs WHERE action = 'FORCE_DISCARD'").fetchone()[0]
 
-    if not rows:
-        return []
+    fig, ax = plt.subplots(figsize=(6, 4))
+    categories = ['کل آرشیو', 'تایید دستی', 'رد دستی', 'کل فعالیت‌ها']
+    values = [total_news, saves, discards, total_logs]
+    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f1c40f']
 
-    candidates = []
-    new_title = extract_title(new_text)
-    clean_new = clean_gaming_text(new_text)
-    clean_title = clean_gaming_text(new_title)
-    new_meta = extract_metadata(new_text)
+    bars = ax.bar(categories, values, color=colors)
+    ax.set_ylabel('تعداد')
+    ax.set_title('آمار عملکرد دیتابیس و مدیریت اخبار Gamefa', fontsize=12)
+    
+    for bar in bars:
+        yval = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2, yval + 0.1, int(yval), ha='center', va='bottom')
 
-    valid_vectors = []
-    vector_row_indices = []
-
-    for idx, row in enumerate(rows):
-        if row["embedding"]:
-            try:
-                valid_vectors.append(json.loads(row["embedding"]))
-                vector_row_indices.append(idx)
-            except Exception:
-                pass
-
-    semantics = [0.0] * len(rows)
-    if new_embedding and valid_vectors:
-        sim_scores = batch_cosine_similarity(new_embedding, valid_vectors)
-        for idx, score in zip(vector_row_indices, sim_scores):
-            semantics[idx] = score
-
-    for idx, row in enumerate(rows):
-        old_text = row["text"]
-        clean_old = row["normalized"]
-        clean_old_title = clean_gaming_text(row["title"] or "")
-
-        lexical = text_similarity(new_text, old_text)
-        seq_title_score = sequence_similarity(new_title, row["title"] or "")
-        token_title_score = token_overlap_ratio(new_title, row["title"] or "")
-        title_score = max(seq_title_score, token_title_score)
-
-        ner_score = entity_overlap_score(new_text, old_text)
-
-        cross_title = 0.0
-        if clean_title and (clean_title in clean_old or clean_old_title in clean_new):
-            cross_title = 0.90
-
-        effective_title = max(title_score, cross_title)
-        semantic = semantics[idx]
-
-        old_meta = extract_metadata(old_text)
-        meta_boost = 0.0
-        if new_meta["events"] and old_meta["events"]:
-            if set(new_meta["events"]) & set(old_meta["events"]):
-                meta_boost = 0.15
-
-        ranking = ((effective_title * 0.30) + (semantic * 0.40) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
-        candidates.append((ranking, semantic, lexical, ner_score, row))
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[:MAX_AI_CANDIDATES]
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
 
 # ============================================================
-# PIPELINE MAIN CHECK
+# MAIN CHECK PIPELINE
 # ============================================================
 
 async def check_duplicate(text: str, image_hash: Optional[str] = None, image_bytes: Optional[bytes] = None) -> Dict[str, Any]:
     if image_bytes and len(text.split()) < 5:
-        vision_text = await analyze_image_content(image_bytes)
-        if vision_text:
-            text = f"{text}\n[توضیحات تصویر]: {vision_text}"
+        ocr_text = await extract_ocr_text(image_bytes)
+        if ocr_text:
+            text = f"{text}\n[متن استخراج‌شده از تصویر]: {ocr_text}"
 
-    cleaned = clean_gaming_text(text)
     fingerprint = sha256_hash(text)
-    url = get_article_url(text)
 
-    def fast_checks():
-        with get_db() as conn:
-            row = conn.execute("SELECT * FROM news WHERE sha256 = ? LIMIT 1", (fingerprint,)).fetchone()
-            if row:
-                return {"duplicate": True, "reason": "exact_hash", "confidence": 1.0, "row": row}
+    # Fast DB Check
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM news WHERE sha256 = ? LIMIT 1", (fingerprint,)).fetchone()
+        if row:
+            return {"duplicate": True, "reason": "exact_hash", "confidence": 1.0, "row": row}
 
-            if url:
-                row = conn.execute("SELECT * FROM news WHERE url = ? LIMIT 1", (url,)).fetchone()
-                if row:
-                    return {"duplicate": True, "reason": "exact_url", "confidence": 1.0, "row": row}
+        if image_hash:
+            img_rows = conn.execute("SELECT * FROM news WHERE image_hash IS NOT NULL AND image_hash != '' ORDER BY id DESC LIMIT 50").fetchall()
+            for r in img_rows:
+                if hamming_distance(image_hash, r["image_hash"]) <= 6:
+                    return {"duplicate": True, "reason": "image_match", "confidence": 0.95, "row": r}
 
-            if image_hash:
-                img_rows = conn.execute("SELECT * FROM news WHERE image_hash IS NOT NULL AND image_hash != '' ORDER BY id DESC LIMIT 50").fetchall()
-                for r in img_rows:
-                    dist = hamming_distance(image_hash, r["image_hash"])
-                    if dist <= 6:
-                        return {"duplicate": True, "reason": "image_match", "confidence": 0.95, "row": r}
-
-            recent_rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT 50").fetchall()
-            for r in recent_rows:
-                overlap = entity_overlap_score(text, r["text"])
-                jaccard = word_jaccard(text, r["text"])
-                if overlap >= 0.75 and jaccard >= 0.50:
-                    return {"duplicate": True, "reason": "near_exact_text", "confidence": 0.95, "row": r}
-
-        return None
-
-    quick_res = await asyncio.to_thread(fast_checks)
-    if quick_res:
-        return quick_res
-
+    # Vector / AI Search
+    cleaned = clean_gaming_text(text)
     embedding = await make_embedding(cleaned)
-    candidates = await asyncio.to_thread(get_candidates_sync, text, embedding)
 
-    tasks = []
-    candidate_meta = []
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT ?", (ARCHIVE_SIZE,)).fetchall()
 
-    for ranking, semantic, lexical, ner_score, row in candidates:
-        if ranking < 0.15:
-            continue
-        tasks.append(ai_compare(text, row["text"]))
-        candidate_meta.append((row, semantic, lexical, ranking))
+    if not rows:
+        return {"duplicate": False, "reason": "new_news", "confidence": 0.0, "row": None}
 
+    candidates = []
+    for r in rows:
+        score = 0.0
+        if embedding and r["embedding"]:
+            try:
+                score = cosine_similarity(embedding, json.loads(r["embedding"]))
+            except Exception:
+                pass
+        candidates.append((score, r))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    top_candidates = candidates[:MAX_AI_CANDIDATES]
+
+    tasks = [ai_compare(text, r["text"]) for sc, r in top_candidates if sc > 0.20]
     if tasks:
-        results = await asyncio.gather(*tasks)
-        best_decision = None
-
-        for result, (row, semantic, lexical, ranking) in zip(results, candidate_meta):
-            if not result:
-                continue
-
-            conf = max(0.0, min(1.0, float(result.confidence)))
-            current = (conf, result, row)
-
-            if best_decision is None or conf > best_decision[0]:
-                best_decision = current
-
-        if best_decision:
-            conf, result, row = best_decision
-            
-            if result.duplicate and result.is_update and conf >= 0.70:
-                return {"duplicate": True, "reason": "ai_update", "confidence": conf, "row": row, "explanation": result.explanation}
-                
-            if result.duplicate and (result.same_event or result.same_claim) and conf >= 0.70:
-                return {"duplicate": True, "reason": "ai_high_confidence", "confidence": conf, "row": row, "explanation": result.explanation}
-                
-            if result.duplicate and conf >= 0.60:
-                return {"duplicate": True, "reason": "ai_ambiguous", "confidence": conf, "row": row, "explanation": result.explanation}
+        ai_results = await asyncio.gather(*tasks)
+        for res, (sc, r) in zip(ai_results, top_candidates):
+            if res and res.duplicate and res.confidence >= 0.70:
+                return {"duplicate": True, "reason": "ai_detected", "confidence": res.confidence, "row": r, "explanation": res.explanation}
 
     return {"duplicate": False, "reason": "new_news", "confidence": 0.0, "row": None}
 
 async def save_news(text: str, image_hash: Optional[str] = None) -> int:
     cleaned = clean_gaming_text(text)
     title = extract_title(text)
-    url = get_article_url(text)
     fingerprint = sha256_hash(text)
-
     embedding = await make_embedding(cleaned)
-    embedding_json = json.dumps(embedding, ensure_ascii=False) if embedding else None
+    embedding_json = json.dumps(embedding) if embedding else None
 
-    def db_save():
-        with get_db() as conn:
-            try:
-                conn.execute(
-                    "INSERT INTO news (telegram_id, text, normalized, title, url, sha256, image_hash, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    ("", text, cleaned, title, url, fingerprint, image_hash or "", embedding_json)
-                )
-            except sqlite3.IntegrityError:
-                pass
-
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO news (telegram_id, text, normalized, title, sha256, image_hash, embedding) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("", text, cleaned, title, fingerprint, image_hash or "", embedding_json)
+            )
             conn.execute("DELETE FROM news WHERE id NOT IN (SELECT id FROM news ORDER BY id DESC LIMIT ?)", (ARCHIVE_SIZE,))
             conn.commit()
-            return conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
-
-    return await asyncio.to_thread(db_save)
-
-def format_old_news_preview(row) -> str:
-    if not row:
-        return ""
-    old_text = row["text"].strip()
-    preview = old_text[:200] + "..." if len(old_text) > 200 else old_text
-    escaped_preview = html.escape(preview)
-    return f"\n\n📌 <b>خبر قبلی موجود در آرشیو:</b>\n«{escaped_preview}»"
+        except sqlite3.IntegrityError:
+            pass
+        return conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
 
 # ============================================================
-# TELEGRAM HANDLERS (WITH PERMISSION & FALLBACK)
+# TELEGRAM HANDLERS
 # ============================================================
 
 def is_allowed(update: Update) -> bool:
@@ -676,11 +506,10 @@ def is_allowed(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update) or not update.message:
         return
-
     await safe_reply_text(
         update.message,
-        "🤖 <b>ربات پیشرفته تشخیص خبر تکراری گیمفا</b>\n\n"
-        "متن یا تصویر خبر را بفرستید تا آنالیز ۶ لایه‌ای انجام شود:",
+        "🤖 <b>ربات هوشمند تشخیص خبر و دستیار محتوای گیمفا</b>\n\n"
+        "متن یا تصویر خبر جدید را جهت آنالیز ارسال کنید:",
         reply_markup=MAIN_KEYBOARD
     )
 
@@ -692,60 +521,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").strip()
     photo = update.message.photo
 
-    if text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
+    # منوی دکمه‌ها
+    if text == "📈 آمار تصویری":
+        chart_buf = generate_analytics_chart_bytes()
+        await update.message.reply_photo(photo=chart_buf, caption="📈 **نمودار تحلیل عملکرد سیستم خبر گیمفا**")
+        return
+
+    elif text == "💾 دریافت بک‌آپ":
+        if user_id != OWNER_ID:
+            await safe_reply_text(update.message, "⛔ <b>دسترسی غیرمجاز!</b>\nدریافت فایل بک‌آپ فقط برای مالک اصلی ربات مجاز است.")
+            return
+        log_audit(user_id, "DOWNLOAD_BACKUP")
+        with open(DB_FILE, "rb") as f:
+            await update.message.reply_document(document=f, filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db", caption="📦 نسخه پشتیبان دیتابیس")
+        return
+
+    elif text == "📜 لاگ ادمین‌ها":
         with get_db() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
-        await safe_reply_text(update.message, f"📊 <b>وضعیت دیتابیس و آرشیو:</b>\n\nتعداد اخبار ذخیره‌شده: <code>{total}/{ARCHIVE_SIZE}</code>")
+            logs = conn.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 10").fetchall()
+        if not logs:
+            await safe_reply_text(update.message, "📜 هیچ لاگ فعالیتی ثبت نشده است.")
+            return
+        msg = "📜 <b>آخرین فعالیت‌های ثبت‌شده ادمین‌ها:</b>\n\n"
+        for l in logs:
+            msg += f"👤 کاربر: <code>{l['user_id']}</code> | اکشن: <b>{l['action']}</b>\n📅 {l['created_at']}\n---\n"
+        await safe_reply_text(update.message, msg)
         return
 
     elif text == "🗑 پاکسازی کامل آرشیو":
-        # بررسی انحصاری شناسه مالک اصلی
         if user_id != OWNER_ID:
-            await safe_reply_text(
-                update.message,
-                "⛔ <b>دسترسی غیرمجاز!</b>\nعملیات پاکسازی کامل آرشیو فقط برای مالک اصلی ربات مجاز است."
-            )
+            await safe_reply_text(update.message, "⛔ <b>دسترسی غیرمجاز!</b>\nعملیات پاکسازی کامل آرشیو فقط برای مالک اصلی ربات مجاز است.")
             return
-
         with get_db() as conn:
             conn.execute("DELETE FROM news")
             conn.commit()
+        log_audit(user_id, "PURGE_ARCHIVE")
         await safe_reply_text(update.message, "🗑 <b>آرشیو دیتابیس با موفقیت پاکسازی شد.</b>", reply_markup=MAIN_KEYBOARD)
         return
 
-    elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
-        await safe_reply_text(
-            update.message,
-            "ℹ️ <b>راهنمای استفاده از ربات:</b>\n\n"
-            "• کافیست متن یا تصویر پست جدید تلگرام را ارسال کنید.\n"
-            "• ربات آن را در ۶ لایه آنالیز کرده و اسامی گیمینگ، پلتفرم‌ها و کاور را تطبیق می‌دهد.\n"
-            "• در صورت تکراری بودن، متن خبر قبلی آرشیو شده به همراه دلیل نمایش داده خواهد شد."
-        )
-        return
-
-    elif text == "🧠 وضعیت AI":
-        status_ai = "🟢 فعال" if openai_client else "🔴 غیرفعال (کلید API تنظیم نشده)"
-        await safe_reply_text(
-            update.message,
-            f"🧠 <b>وضعیت موتور هوش مصنوعی:</b>\n\n"
-            f"• وضعیت اتصال: {status_ai}\n"
-            f"• مدل پردازش متنی و Vision: <code>{AI_MODEL}</code>\n"
-            f"• مدل Embedding: <code>{EMBEDDING_MODEL}</code>"
-        )
-        return
-
-    elif text == "⚙️ تنظیمات":
-        await safe_reply_text(
-            update.message,
-            f"⚙️ <b>تنظیمات فعلی ربات:</b>\n\n"
-            f"• حداکثر ظرفیت آرشیو: <code>{ARCHIVE_SIZE}</code> خبر\n"
-            f"• شناسه مالك اصلی: <code>{OWNER_ID}</code>\n"
-            f"• مدل هوش مصنوعی: <code>{AI_MODEL}</code>"
-        )
-        return
-
-    elif text == "💬 پشتیبانی":
-        await safe_reply_text(update.message, "💬 <b>پشتیبانی و ارتباط:</b>\n\nجهت گزارش مشکلات با توسعه‌دهنده در ارتباط باشید.")
+    elif text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
+        with get_db() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
+        await safe_reply_text(update.message, f"📊 <b>وضعیت دیتابیس:</b>\n\nتعداد اخبار ذخیره‌شده: <code>{total}/{ARCHIVE_SIZE}</code>")
         return
 
     elif text == "👥 ادمین‌ها":
@@ -753,18 +570,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply_text(update.message, f"👥 <b>مدیریت دسترسی:</b>\n\n• مالک اصلی: <code>{OWNER_ID}</code>\n• شناسه ادمین‌ها: <code>{admins_str}</code>")
         return
 
-    elif text == "📜 قوانین":
-        await safe_reply_text(
-            update.message,
-            "📜 <b>قوانین و ضوابط بررسی اخبار:</b>\n\n"
-            "۱. اخبار تکراری حتی با تغییر کلمات، بازنویسی یا نام‌های مترادف شناسایی خواهند شد.\n"
-            "۲. اخبار تکمیلی و بروزرسانی‌ها (Update) به عنوان خبر تکراری شناسایی می‌شوند."
-        )
-        return
-
+    # پردازش خبر ارسال‌شده
     image_hash = None
     image_bytes = None
-
     if photo:
         file = await context.bot.get_file(photo[-1].file_id)
         img_bytearray = await file.download_as_bytearray()
@@ -774,102 +582,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and not image_hash:
         return
 
-    status = await safe_reply_text(update.message, "🔎 در حال آنالیز ۶ لایه‌ای (کاور، اسامی گیمینگ، متادیتا و AI)...")
+    status = await safe_reply_text(update.message, "🔎 در حال آنالیز ۶ لایه‌ای و استخراج هوشمند اطلاعات...")
 
-    try:
-        result = await check_duplicate(text, image_hash, image_bytes)
+    result = await check_duplicate(text, image_hash, image_bytes)
 
-        if result["duplicate"]:
-            conf = result["confidence"] * 100
-            reason = result["reason"]
-            old_preview = format_old_news_preview(result.get("row"))
-
-            if reason in ["exact_hash", "exact_url", "near_exact_text", "title_exact_match"]:
-                await safe_edit_text(status, f"♻️ <b>خبر کاملاً تکراری است</b> (اطمینان بالا){old_preview}\n\n⛔ خبر ذخیره نشد.")
-                return
-
-            elif reason == "image_match":
-                await safe_edit_text(status, f"🖼 <b>کاور/تصویر خبر تکراری است</b>{old_preview}\n\n⛔ خبر ذخیره نشد.")
-                return
-
-            elif reason == "ai_update":
-                explanation = html.escape(result.get("explanation", ""))
-                await safe_edit_text(
-                    status,
-                    f"ℹ️ <b>این پست بروزرسانی / پوشش تکمیلی خبر قبلی است</b>\n\n"
-                    f"🎯 درصد شباهت: {conf:.1f}%\n"
-                    f"💡 تحلیل AI: {explanation}"
-                    f"{old_preview}\n\n"
-                    f"⛔ به عنوان خبر مستقل ذخیره نشد."
-                )
-                return
-
-            elif reason == "ai_high_confidence":
-                explanation = html.escape(result.get("explanation", ""))
-                await safe_edit_text(
-                    status,
-                    f"♻️ <b>خبر تکراری است</b>\n\n"
-                    f"🎯 درصد اطمینان: {conf:.1f}%\n"
-                    f"💡 دلیل AI: {explanation}"
-                    f"{old_preview}\n\n"
-                    f"⛔ خبر ذخیره نشد."
-                )
-                return
-
-            elif reason == "ai_ambiguous":
-                context.user_data["pending_news"] = text
-                context.user_data["pending_image_hash"] = image_hash
-                keyboard = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("✅ ذخیره شود (خبر جدید)", callback_data="force_save"),
-                        InlineKeyboardButton("❌ رد شود (تکراری)", callback_data="force_discard")
-                    ]
-                ])
-                explanation = html.escape(result.get("explanation", ""))
-                await safe_edit_text(
-                    status,
-                    f"⚠️ <b>نیازمند بررسی ادمین</b>\n\n"
-                    f"🎯 درصد شباهت: {conf:.1f}%\n"
-                    f"💡 تحلیل AI: {explanation}"
-                    f"{old_preview}\n\n"
-                    f"آیا خبر ذخیره شود؟",
-                    reply_markup=keyboard
-                )
-                return
-
-        total = await save_news(text, image_hash)
+    if result["duplicate"]:
+        conf = result["confidence"] * 100
+        old_text = result["row"]["text"][:200]
+        explanation = html.escape(result.get("explanation", "مطابقت با داده‌های آرشیو."))
         await safe_edit_text(
             status,
-            f"🆕 <b>خبر جدید است</b>\n\n"
-            f"✅ ذخیره شد.\n"
-            f"📦 آرشیو: {total}/{ARCHIVE_SIZE}"
+            f"♻️ <b>خبر تکراری است!</b>\n\n"
+            f"🎯 درصد اطمینان: {conf:.1f}%\n"
+            f"💡 دلیل AI: {explanation}\n\n"
+            f"📌 <b>خبر قبلی موجود:</b>\n«{html.escape(old_text)}...»\n\n"
+            f"⛔ خبر ذخیره نشد."
+        )
+        log_audit(user_id, "DUPLICATE_DETECTED", f"Confidence: {conf:.1f}%")
+        return
+
+    # ذخیره و تولید پیش‌نویس بازنویسی شده با AI
+    total = await save_news(text, image_hash)
+    log_audit(user_id, "SAVE_NEWS")
+
+    assistant_data = await generate_ai_assistant_content(text)
+    
+    response_msg = f"🆕 <b>خبر جدید است و ذخیره شد.</b>\n📦 ظرفیت آرشیو: {total}/{ARCHIVE_SIZE}\n\n"
+    if assistant_data:
+        tags = " ".join([f"#{t.strip('#')}" for t in assistant_data.hashtags])
+        response_msg += (
+            f"🚨 <b>سطح اهمیت:</b> {assistant_data.urgency_level}\n\n"
+            f"✍️ <b>پیش‌نویس پیشنهاد شده برای انتشار:</b>\n"
+            f"«{html.escape(assistant_data.rewritten_text)}»\n\n"
+            f"🏷 <b>هشتگ‌ها:</b>\n{tags}"
         )
 
-    except Exception as e:
-        logger.exception("Processing Error")
-        escaped_err = html.escape(str(e))
-        await safe_edit_text(status, f"❌ خطا در پردازش:\n<code>{escaped_err}</code>")
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-
-    pending_text = context.user_data.get("pending_news")
-    pending_img = context.user_data.get("pending_image_hash")
-
-    if query.data == "force_save" and pending_text:
-        total = await save_news(pending_text, pending_img)
-        await safe_edit_text(query.message, f"✅ خبر ذخیره شد.\n📦 آرشیو: {total}/{ARCHIVE_SIZE}")
-    elif query.data == "force_discard":
-        await safe_edit_text(query.message, "❌ خبر تکراری تشخیص داده شد و رد گردید.")
-
-    context.user_data.pop("pending_news", None)
-    context.user_data.pop("pending_image_hash", None)
+    await safe_edit_text(status, response_msg)
 
 # ============================================================
-# MAIN
+# INLINE SEARCH HANDLER FOR ADMINS
+# ============================================================
+
+async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.strip()
+    if not query:
+        return
+
+    norm_query = normalize(query)
+    with get_db() as conn:
+        rows = conn.execute("SELECT title, text FROM news WHERE normalized LIKE ? ORDER BY id DESC LIMIT 5", (f"%{norm_query}%",)).fetchall()
+
+    results = []
+    for idx, r in enumerate(rows):
+        results.append(
+            InlineQueryResultArticle(
+                id=str(idx),
+                title=r["title"] or "خبر آرشیوی",
+                input_message_content=InputTextMessageContent(f"📌 <b>{html.escape(r['title'] or '')}</b>\n\n{html.escape(r['text'][:500])}...", parse_mode="HTML")
+            )
+        )
+    await update.inline_query.answer(results)
+
+# ============================================================
+# MAIN APPLICATION EXECUTION
 # ============================================================
 
 def main():
@@ -882,9 +657,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(InlineQueryHandler(inline_search))
 
-    logger.info("GAMEFA ADVANCED DUPLICATE ENGINE STARTED WITH OPTIMIZATIONS")
+    logger.info("GAMEFA FULL-FEATURED ENGINE STARTED SUCCESSFULLY")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
