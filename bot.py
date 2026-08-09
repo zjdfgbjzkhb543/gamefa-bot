@@ -11,8 +11,8 @@ import logging
 import asyncio
 import unicodedata
 from enum import Enum
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Dict, Any, Tuple, Set
 from difflib import SequenceMatcher
 
 from PIL import Image
@@ -51,6 +51,10 @@ ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "150"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o")
+FAST_AI_MODEL = os.getenv("FAST_AI_MODEL", "gpt-4o-mini")
+
+# [ایده ۱] بازه زمانی اعتبار اخبار (بر حسب روز)
+MAX_NEWS_AGE_DAYS = int(os.getenv("MAX_NEWS_AGE_DAYS", "14"))
 MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))
 
 # ============================================================
@@ -160,6 +164,7 @@ class AIResult(BaseModel):
     subject_entity: str = Field(description="نام بازی، شخص، رسانه یا کمپانی اصلی خبر")
     core_event_summary: str = Field(description="خلاصه رویداد، مصاحبه یا ادعای اصلی")
     is_same_subject_and_event: bool = Field(description="آیا هر دو خبر درباره یک شخص/رویداد/مصاحبه/بازی یکسان صحبت می‌کنند؟")
+    has_numerical_update: bool = Field(description="آیا آمار، قیمت یا تاریخ کلیدی خبر دوم نسبت به خبر اول تغییر کرده است؟")
     match_type: MatchType = Field(description="دسته‌بندی دقیق ارتباط دو خبر")
     duplicate: bool = Field(description="آیا خبر دوم باید به عنوان تکراری/موازی مسدود شود؟")
     confidence: float = Field(description="میزان اطمینان بین 0.0 تا 1.0")
@@ -205,7 +210,6 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_url ON news(url)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_image_hash ON news(image_hash)")
 
-        # Populate initial admins
         initial_admins = set(DEFAULT_ADMIN_IDS + [OWNER_ID])
         for aid in initial_admins:
             if aid != 0:
@@ -246,10 +250,10 @@ def is_allowed(update: Update) -> bool:
     return user.id in allowed_ids
 
 # ============================================================
-# PERSIAN GAMING PRE-PROCESSING
+# PERSIAN GAMING PRE-PROCESSING & EXTRACTION ENGINE
 # ============================================================
 
-PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧۸۹", "01234567890123456789")
 
 BADGES_PATTERN = re.compile(
     r'\[(شایعه|رسمی|فوری|تحلیل|ویدیو|تکمیلی|اختصاصی|گیمفا|دانلود|تریلر)\]|'
@@ -298,27 +302,34 @@ def clean_gaming_text(text: str) -> str:
     text = DECORATION_PATTERN.sub(" ", text)
     return normalize(text)
 
-# ============================================================
-# METADATA & ENTITIES EXTRACTION
-# ============================================================
+# [ایده ۳] استخراج اعداد، آمار و مقادیر کلیدی
+def extract_numbers(text: str) -> Set[str]:
+    if not text:
+        return set()
+    text_norm = text.translate(PERSIAN_ARABIC_DIGITS)
+    nums = re.findall(r'\b\d+(?:\.\d+)?\b', text_norm)
+    return set(nums)
+
+# [ایده ۲] استخراج پیشرفته اسامی خاص (Named Entity Recognition - NER)
+def extract_entities(text: str) -> Set[str]:
+    if not text:
+        return set()
+    cleaned = clean_gaming_text(text)
+    words = cleaned.split()
+    persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 3)
+    eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{2,}\b', text))
+    return persian_entities | eng_entities
 
 def extract_metadata(text: str) -> Dict[str, Any]:
     cleaned = clean_gaming_text(text)
     found_events = [event for event in EVENT_TYPES if event in cleaned]
     entities = extract_entities(text)
+    numbers = extract_numbers(text)
     return {
         "events": found_events,
-        "entities": entities
+        "entities": entities,
+        "numbers": numbers
     }
-
-def extract_entities(text: str) -> set:
-    if not text:
-        return set()
-    cleaned = clean_gaming_text(text)
-    words = cleaned.split()
-    persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 2)
-    eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{1,}\b', text))
-    return persian_entities | eng_entities
 
 def entity_overlap_score(text1: str, text2: str) -> float:
     e1 = extract_entities(text1)
@@ -371,14 +382,15 @@ def extract_title(text: str) -> str:
     return title[:600]
 
 # ============================================================
-# IMAGE PERCEPTUAL HASHING
+# [ایده ۶] ADVANCED IMAGE HASHING (CROP BORDERS)
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert('L')
         w, h = img.size
-        img = img.crop((int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9)))
+        # برش ۱۵ درصدی از حاشیه‌ها جهت حذف لوگو/واترمارک‌های ثابت گیمفا
+        img = img.crop((int(w * 0.15), int(h * 0.15), int(w * 0.85), int(h * 0.85)))
         img = img.resize((9, 8), Image.Resampling.LANCZOS)
         
         pixels = list(img.getdata())
@@ -500,18 +512,18 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
 دستورالعمل‌های بدون اغماض:
 
 ۱. تطابق موضوعی (Subject Matching):
-   - اگر هر دو خبر درباره نظر/واکنش/مصاحبه یک شخص خاص (مثلاً خالق یک بازی) درباره یک بازی/بتا/بخش چندنفره هستند، حتماً duplicate = true است.
-   - حتی اگر یکی از اخبار کوتاه و دیگری کامل‌تر باشد، خبر کوتاه، تکراری یا پوشش موازی محسوب می‌شود.
+   - اگر هر دو خبر درباره نظر/واکنش/مصاحبه یک شخص خاص یا یک بازی یکسان صحبت می‌کنند، duplicate = true است.
 
 ۲. بازنویسی و تغییر تیتر (Paraphrasing):
-   - تغییر کلمات، خلاصه کردن، یا استفاده از مترادف‌ها در تیترها نباید باعث عبور خبر شود.
+   - تغییر کلمات یا استفاده از مترادف‌ها در تیترها نباید باعث عبور خبر شود.
 
-۳. دسته‌بندی ارتباط:
+۳. تحلیل اعداد و آمار (Numerical Guard):
+   - اگر موضوع یکسان است اما اعداد کلیدی (مثل فروش، قیمت یا تاریخ) تغییر کرده‌اند، has_numerical_update را true بگذارید و match_type = "update_coverage" قرار دهید.
+
+۴. دسته‌بندی ارتباط:
    - match_type = "exact_duplicate": موضوع و رویداد دقیقاً یکسان است.
-   - match_type = "update_coverage": خبر جدید، آپدیت یا تیتر دیگری از همان مصاحبه/رویداد قبلی است.
-   - match_type = "different_news": خبرها کاملاً به دو موضوع غیرمرتبط می‌پردازند.
-
-در صورت کوچک‌ترین شباهت در سوژه و منبع خبر، duplicate را true قرار دهید.
+   - match_type = "update_coverage": خبر جدید، آپدیت، آمار جدید یا تیتر دیگری از همان خبر/مصاحبه قبلی است.
+   - match_type = "different_news": خبرها کاملاً به دو سوژه/موضوع غیرمرتبط می‌پردازند.
 """
 
     user_prompt = f"""
@@ -540,7 +552,7 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         return None
 
 # ============================================================
-# CANDIDATE SELECTION
+# CANDIDATE SELECTION WITH TIME-WINDOW & NER GUARDS
 # ============================================================
 
 def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
@@ -555,6 +567,7 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
     clean_new = clean_gaming_text(new_text)
     clean_title = clean_gaming_text(new_title)
     new_meta = extract_metadata(new_text)
+    now = datetime.now(timezone.utc)
 
     valid_vectors = []
     vector_row_indices = []
@@ -578,12 +591,28 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
         clean_old = row["normalized"]
         clean_old_title = clean_gaming_text(row["title"] or "")
 
+        # [ایده ۱] فیلتر بازه زمانی (Time-Window Decay)
+        created_at_str = row["created_at"]
+        time_penalty = 1.0
+        if created_at_str:
+            try:
+                created_dt = datetime.strptime(created_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                age_days = (now - created_dt).days
+                if age_days > MAX_NEWS_AGE_DAYS:
+                    time_penalty = max(0.2, 1.0 - ((age_days - MAX_NEWS_AGE_DAYS) * 0.05))
+            except Exception:
+                pass
+
         lexical = text_similarity(new_text, old_text)
         seq_title_score = sequence_similarity(new_title, row["title"] or "")
         token_title_score = token_overlap_ratio(new_title, row["title"] or "")
         title_score = max(seq_title_score, token_title_score)
 
         ner_score = entity_overlap_score(new_text, old_text)
+
+        # [ایده ۲] Guard عدم تطابق اسامی خاص (NER Guard)
+        if ner_score < 0.15 and len(new_meta["entities"]) >= 2:
+            ner_score *= 0.2
 
         cross_title = 0.0
         if clean_title and (clean_title in clean_old or clean_old_title in clean_new):
@@ -598,10 +627,15 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
             if set(new_meta["events"]) & set(old_meta["events"]):
                 meta_boost = 0.15
 
-        ranking = ((effective_title * 0.35) + (semantic * 0.35) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
+        # [ایده ۳] بررسی جابه‌جایی اعداد
+        if new_meta["numbers"] and old_meta["numbers"]:
+            if new_meta["numbers"] != old_meta["numbers"] and ner_score > 0.40:
+                meta_boost += 0.10
+
+        ranking = (((effective_title * 0.35) + (semantic * 0.35) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost) * time_penalty
 
         if ner_score >= 0.30:
-            ranking += 0.30
+            ranking += 0.25
 
         candidates.append((ranking, semantic, lexical, ner_score, row))
 
@@ -609,18 +643,25 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
     return candidates[:MAX_AI_CANDIDATES]
 
 # ============================================================
-# CHECK DUPLICATE PIPELINE
+# CHECK DUPLICATE PIPELINE (2-STAGE VERIFICATION & DYNAMIC THRESHOLD)
 # ============================================================
 
 async def check_duplicate(text: str, image_hash: Optional[str] = None, image_bytes: Optional[bytes] = None) -> Dict[str, Any]:
+    # [ایده ۶] استخراج متن از تصویر با مدل بینایی و ترکیب با متن اولیه
     if image_bytes and len(text.split()) < 5:
         vision_text = await analyze_image_content(image_bytes)
         if vision_text:
             text = f"{text}\n[توضیحات تصویر]: {vision_text}"
 
     cleaned = clean_gaming_text(text)
+    word_count = len(cleaned.split())
     fingerprint = sha256_hash(text)
     url = get_article_url(text)
+
+    # [ایده ۵] حد آستانه پویا بر اساس طول متن (Dynamic Thresholding)
+    required_conf = 0.60
+    if word_count < 30:
+        required_conf = 0.75  # متن‌های بسیار کوتاه نیاز به اطمینان بالاتر دارند
 
     def fast_checks():
         with get_db() as conn:
@@ -637,14 +678,14 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
                 img_rows = conn.execute("SELECT * FROM news WHERE image_hash IS NOT NULL AND image_hash != '' ORDER BY id DESC LIMIT 50").fetchall()
                 for r in img_rows:
                     dist = hamming_distance(image_hash, r["image_hash"])
-                    if dist <= 6:
+                    if dist <= 5:  # سخت‌گیرانه‌تر شدن فاصله Hamming به دلیل Crop حاشیه‌ها
                         return {"duplicate": True, "reason": "image_match", "confidence": 0.95, "row": r}
 
             recent_rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT 50").fetchall()
             for r in recent_rows:
                 overlap = entity_overlap_score(text, r["text"])
                 jaccard = word_jaccard(text, r["text"])
-                if overlap >= 0.70 and jaccard >= 0.45:
+                if overlap >= 0.75 and jaccard >= 0.50:
                     return {"duplicate": True, "reason": "near_exact_text", "confidence": 0.95, "row": r}
 
         return None
@@ -656,12 +697,13 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     embedding = await make_embedding(cleaned)
     candidates = await asyncio.to_thread(get_candidates_sync, text, embedding)
 
+    # [ایده ۴] غربالگری دو مرحله‌ای (Two-Stage Verification)
+    stage1_candidates = [c for c in candidates if c[0] >= 0.25][:3]
+
     tasks = []
     candidate_meta = []
 
-    for ranking, semantic, lexical, ner_score, row in candidates:
-        if ranking < 0.01:
-            continue
+    for ranking, semantic, lexical, ner_score, row in stage1_candidates:
         tasks.append(ai_compare(text, row["text"]))
         candidate_meta.append((row, semantic, lexical, ranking))
 
@@ -682,16 +724,16 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
         if best_decision:
             conf, result, row = best_decision
             
-            if result.duplicate and (result.match_type == MatchType.UPDATE_COVERAGE or conf >= 0.60):
+            if result.duplicate and (result.match_type == MatchType.UPDATE_COVERAGE or conf >= required_conf):
                 return {
                     "duplicate": True,
-                    "reason": "ai_update" if result.match_type == MatchType.UPDATE_COVERAGE else "ai_high_confidence",
+                    "reason": "ai_update" if (result.match_type == MatchType.UPDATE_COVERAGE or result.has_numerical_update) else "ai_high_confidence",
                     "confidence": conf,
                     "row": row,
                     "explanation": result.explanation
                 }
             
-            if result.duplicate and conf >= 0.50:
+            if result.duplicate and conf >= (required_conf - 0.10):
                 return {
                     "duplicate": True,
                     "reason": "ai_ambiguous",
@@ -747,12 +789,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     welcome_text = (
-        "✨ <b>سامانه هوشمند پایش و تشخیص اخبار تکراری گیمفا</b>\n"
+        "✨ <b>سامانه هوشمند پایش و تشخیص اخبار تکراری گیمفا v2.0</b>\n"
         "─── • 💎 • ───\n\n"
         "به دستیار ارزیابی اخبار خوش آمدید.\n"
         "جهت بررسی، کافیست <b>متن خبر</b> یا <b>پوستر اختصاصی</b> را ارسال نمایید.\n\n"
-        "▪️ <i>مجهز به موتور پردازش چندلایه‌ای GPT-4o</i>\n"
-        "▪️ <i>پشتیبانی کامل از بینایی ماشین و تحلیل تصویر</i>"
+        "▪️ <i>مجهز به فیلتر بازه زمانی و گارد اسامی خاص (NER)</i>\n"
+        "▪️ <i>پشتیبانی از تحلیل هوشمند اعداد و پایش دو مرحله‌ای</i>"
     )
 
     await safe_reply_text(update.message, welcome_text, reply_markup=MAIN_KEYBOARD)
@@ -765,14 +807,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").strip()
     photo = update.message.photo
 
-    # Check if user is in "awaiting_admin_id" action state
     if context.user_data.get("action") == "await_admin_id":
         if text in ["🔍 بررسی خبر جدید", "📊 آمار آرشیو", "🧠 وضعیت هوش مصنوعی", "📋 راهنما", "⚙️ تنظیمات سیستم", "👥 لیست مدیران", "🗑 پاکسازی کامل آرشیو"]:
             context.user_data.pop("action", None)
         else:
             clean_input = text.strip()
             if not clean_input.isdigit():
-                await safe_reply_text(update.message, "❌ <b>خطا:</b> لطفاً فقط آیدی عددی کاربر (Numeric Chat ID) را با اعداد انگلیسی وارد کنید.")
+                await safe_reply_text(update.message, "❌ <b>خطا:</b> لطفاً فقط آیدی عددی کاربر را وارد کنید.")
                 return
             
             new_admin_id = int(clean_input)
@@ -782,7 +823,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if success:
                 await safe_reply_text(
                     update.message, 
-                    f"✅ <b>مدیر جدید اضافه شد.</b>\n\nکاربر با آیدی <code>{new_admin_id}</code> با موفقیت به سیستم اضافه گردید.",
+                    f"✅ <b>مدیر جدید اضافه شد.</b>\n\nکاربر با آیدی <code>{new_admin_id}</code> با موفقیت اضافه شد.",
                     reply_markup=MAIN_KEYBOARD
                 )
             else:
@@ -823,11 +864,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
         guide_text = (
-            "📋 <b>راهنمای عملکردهای هوشمند:</b>\n"
+            "📋 <b>راهنمای عملکردهای هوشمند v2.0:</b>\n"
             "─── • 💎 • ───\n\n"
-            "🔹 <b>ارسال متن:</b> متن خبر را مستقیم ارسال کنید تا با کل دیتابیس تطبیق داده شود.\n"
-            "🔹 <b>ارسال پوستر:</b> تصاویر حاوی متن با مدل بینایی بررسی می‌شوند.\n"
-            "🔹 <b>ثبت اختیاری اخبار تکراری:</b> در صورت تشخیص تکراری بودن خبر، می‌توانید با دکمه اختصاصی آن را اجباراً در آرشیو ثبت کنید."
+            "🔹 <b>ارسال متن:</b> بررسی چندلایه‌ای با گارد اسامی و اعداد.\n"
+            "🔹 <b>ارسال پوستر:</b> برش هوشمند لوگوها + تحلیل OCR با بینایی ماشین.\n"
+            "🔹 <b>فیلتر زمان:</b> کاهش وزن اخبار قدیمی‌تر از ۱۴ روز در آنالیز."
         )
         await safe_reply_text(update.message, guide_text)
         return
@@ -839,8 +880,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "─── • 💎 • ───\n\n"
             f"🔹 <b>وضعیت اتصال:</b> {status_ai}\n"
             f"🔹 <b>مدل اصلی تحلیل:</b> <code>{AI_MODEL}</code>\n"
-            f"🔹 <b>مدل ساختار برداری:</b> <code>{EMBEDDING_MODEL}</code>\n"
-            f"🔹 <b>معماری تحلیل:</b> <code>Chain-of-Thought Strict</code>"
+            f"🔹 <b>بازه زمانی آنالیز:</b> <code>{MAX_NEWS_AGE_DAYS} روز اخیر</code>\n"
+            f"🔹 <b>معماری تحلیل:</b> <code>Two-Stage Chain-of-Thought</code>"
         )
         await safe_reply_text(update.message, ai_text)
         return
@@ -849,9 +890,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_text = (
             "⚙️ <b>تنظیمات و زیرساخت فنی</b>\n"
             "─── • 💎 • ───\n\n"
-            f"🔸 <b>حداکثر سقف آرشیو:</b> <code>{ARCHIVE_SIZE}</code>\n"
-            f"🔸 <b>شناسه مالک:</b> <code>{OWNER_ID}</code>\n"
-            f"🔸 <b>پایگاه داده:</b> <code>SQLite WAL Mode</code>"
+            f"🔸 <b>سقف آرشیو:</b> <code>{ARCHIVE_SIZE}</code>\n"
+            f"🔸 <b>بازه اعتبار اخبار:</b> <code>{MAX_NEWS_AGE_DAYS} روز</code>\n"
+            f"🔸 <b>شناسه مالک:</b> <code>{OWNER_ID}</code>"
         )
         await safe_reply_text(update.message, settings_text)
         return
@@ -931,7 +972,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 explanation = html.escape(result.get("explanation", ""))
                 await safe_edit_text(
                     status,
-                    f"🔄 <b>پوشش موازی / تکمیلی خبر قبلی</b>\n"
+                    f"🔄 <b>پوشش موازی / آپدیت آمار و خبر قبلی</b>\n"
                     f"─── • 💎 • ───\n\n"
                     f"🎯 <b>اطمینان سیستم:</b> <code>{conf:.1f}%</code>\n"
                     f"💡 <b>استدلال:</b> {explanation}"
@@ -1017,7 +1058,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("pending_image_hash", None)
         await safe_edit_text(query.message, "🗑 <b>خبر به عنوان تکراری علامه‌گذاری و رد شد.</b>")
 
-    # Dynamic Admin Management Callbacks (Owner Only)
     elif query.data == "admin_add_prompt":
         if user_id != OWNER_ID:
             await query.answer("🚫 شما دسترسی مالک را ندارید.", show_alert=True)
@@ -1091,7 +1131,7 @@ def main():
         )
     )
 
-    logger.info("ربات هوشمند گیمفا با مدیریت کامل و دینامیک مدیران فعال شد...")
+    logger.info("ربات هوشمند ارتقایافته گیمفا فعال شد...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
