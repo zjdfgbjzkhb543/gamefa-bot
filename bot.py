@@ -449,11 +449,13 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
 
     system_prompt = """
 تو موتور هوشمند تشخیص اخبار تکراری رسانه گیمفا هستی.
-تکلیف: تشخیص بده آیا این دو خبر مربوط به یک موضوع/رویداد یکسان هستند یا خیر.
+تکلیف: تشخیص بده آیا این دو خبر مربوط به یک موضوع، رویداد، مصاحبه یا واکنش یکسان هستند یا خیر.
 
 قوانین تشخیص:
-۱. بازنویسی تیترها (Paraphrasing): اگر دو خبر یک ادعا یا رویداد واحد را با کلمات یا افعال متفاوت بیان می‌کنند، این اخبار ۱۰۰٪ تکراری هستند.
-۲. اسامی و اعداد: اگر نام شرکت/بازی و عدد کلیدی خبر یکسان باشد (مثلاً THQ Nordic و ۱۲ بازی)، حتماً تکراری است.
+۱. بازنویسی تیترها (Paraphrasing): اگر دو خبر در مورد یک مصاحبه، یک شخص (مثلا خالق بازی) یا یک رویداد یکسان صحبت می‌کنند (حتی اگر یکی کلی‌تر و دیگری جزیی‌تر باشد)، این اخبار duplicate = true هستند.
+۲. نظر و واکنش: اگر هر دو خبر درباره نظر یک شخص درباره یک بازی/بتا هستند، حتماً تکراری محسوب می‌شوند.
+۳. پوشش موازی: اگر خبر دوم تکمیل‌کننده یا تیتر دیگری از همان مصاحبه/خبر باشد، is_update = true و duplicate = true بگذار.
+۴. اسامی و اعداد: اگر نام شرکت/بازی و عدد کلیدی خبر یکسان باشد، حتماً تکراری است.
 """
 
     user_prompt = f"""
@@ -539,7 +541,11 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
             if set(new_meta["events"]) & set(old_meta["events"]):
                 meta_boost = 0.15
 
-        ranking = ((effective_title * 0.30) + (semantic * 0.40) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
+        ranking = ((effective_title * 0.35) + (semantic * 0.35) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
+        
+        if ner_score >= 0.40:
+            ranking += 0.20
+
         candidates.append((ranking, semantic, lexical, ner_score, row))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -597,7 +603,7 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     candidate_meta = []
 
     for ranking, semantic, lexical, ner_score, row in candidates:
-        if ranking < 0.15:
+        if ranking < 0.05:
             continue
         tasks.append(ai_compare(text, row["text"]))
         candidate_meta.append((row, semantic, lexical, ranking))
@@ -855,55 +861,52 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
 
-    if not is_allowed(update):
-        if query.message:
-            await safe_edit_text(query.message, "⛔ <b>دسترسی غیرمجاز!</b>")
-        return
+    if query.data == "force_save":
+        text = context.user_data.get("pending_news")
+        image_hash = context.user_data.get("pending_image_hash")
 
-    data = query.data
-    if data == "force_save":
-        pending_text = context.user_data.get("pending_news", "")
-        pending_hash = context.user_data.get("pending_image_hash")
-
-        if pending_text or pending_hash:
-            total = await save_news(pending_text, pending_hash)
+        if text:
+            total = await save_news(text, image_hash)
+            await safe_edit_text(
+                query.message,
+                f"✅ <b>خبر با موفقیت ذخیره شد.</b>\n\n"
+                f"📦 ظرفیت آرشیو: {total}/{ARCHIVE_SIZE}"
+            )
             context.user_data.pop("pending_news", None)
             context.user_data.pop("pending_image_hash", None)
-            if query.message:
-                await safe_edit_text(
-                    query.message,
-                    f"✅ <b>خبر با موفقیت توسط ادمین ذخیره شد.</b>\n\n📦 آرشیو: {total}/{ARCHIVE_SIZE}"
-                )
         else:
-            if query.message:
-                await safe_edit_text(query.message, "❌ داده‌ای برای ذخیره‌سازی یافت نشد یا منقضی شده است.")
+            await safe_edit_text(query.message, "❌ <b>اطلاعات خبر یافت نشد یا منقضی شده است.</b>")
 
-    elif data == "force_discard":
+    elif query.data == "force_discard":
         context.user_data.pop("pending_news", None)
         context.user_data.pop("pending_image_hash", None)
-        if query.message:
-            await safe_edit_text(query.message, "❌ <b>ذخیره‌سازی خبر توسط ادمین لغو شد.</b>")
+        await safe_edit_text(query.message, "🗑 <b>خبر تکراری تشخیص داده شد و ذخیره نگردید.</b>")
 
 # ============================================================
-# BOT APPLICATION ENTRY POINT
+# MAIN ENTRY POINT
 # ============================================================
 
 def main():
     if not BOT_TOKEN:
-        logger.error("خطا: BOT_TOKEN در متغیرهای محیطی (Environment Variables) تنظیم نشده است.")
+        logger.error("BOT_TOKEN یافت نشد! لطفاً متغیر محیطی BOT_TOKEN را تنظیم کنید.")
         return
 
     init_db()
-    logger.info("دیتابیس SQLite با موفقیت آماده‌سازی شد.")
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, handle_message))
+    # Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+            handle_message
+        )
+    )
 
-    logger.info("ربات با موفقیت روشن شد و در حال دریافت پیام‌ها است...")
-    app.run_polling()
+    logger.info("ربات تشخیص خبر تکراری گیمفا با موفقیت روشن شد...")
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
