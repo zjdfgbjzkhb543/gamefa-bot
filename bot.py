@@ -92,7 +92,7 @@ EVENT_TYPES = [
 ]
 
 # ============================================================
-# MAIN REPLY KEYBOARD LAYOUT (UI REDESIGNED)
+# MAIN REPLY KEYBOARD LAYOUT
 # ============================================================
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -692,7 +692,7 @@ def format_old_news_preview(row) -> str:
     )
 
 # ============================================================
-# TELEGRAM HANDLERS (STYLISH UI)
+# TELEGRAM HANDLERS (STYLISH UI & FORCE SAVE BUTTON)
 # ============================================================
 
 def is_allowed(update: Update) -> bool:
@@ -762,7 +762,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "─── • 💎 • ───\n\n"
             "🔹 <b>ارسال متن:</b> متن خبر را مستقیم ارسال کنید تا با کل دیتابیس تطبیق داده شود.\n"
             "🔹 <b>ارسال پوستر:</b> تصاویر حاوی متن با مدل بینایی بررسی می‌شوند.\n"
-            "🔹 <b>تشخیص اخبار مکمل:</b> مصاحبه‌های چندبخشی و بازنویسی‌ها خودکار مسدود می‌شوند."
+            "🔹 <b>ثبت اختیاری اخبار تکراری:</b> در صورت تشخیص تکراری بودن خبر، می‌توانید با دکمه اختصاصی آن را اجباراً در آرشیو ثبت کنید."
         )
         await safe_reply_text(update.message, guide_text)
         return
@@ -824,13 +824,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reason = result["reason"]
             old_preview = format_old_news_preview(result.get("row"))
 
+            # Save pending context for manual override button
+            context.user_data["pending_news"] = text
+            context.user_data["pending_image_hash"] = image_hash
+
+            force_save_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 با این حال در آرشیو ذخیره شود", callback_data="force_save")]
+            ])
+
             if reason in ["exact_hash", "exact_url", "near_exact_text"]:
                 await safe_edit_text(
                     status,
                     f"⛔ <b>خبر کاملاً تکراری است</b>\n"
                     f"─── • 💎 • ───"
-                    f"{old_preview}\n\n"
-                    f"❌ <i>خبر در آرشیو ذخیره نشد.</i>"
+                    f"{old_preview}",
+                    reply_markup=force_save_keyboard
                 )
                 return
 
@@ -839,8 +847,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status,
                     f"🖼 <b>پوستر خبر تکراری است</b>\n"
                     f"─── • 💎 • ───"
-                    f"{old_preview}\n\n"
-                    f"❌ <i>خبر در آرشیو ذخیره نشد.</i>"
+                    f"{old_preview}",
+                    reply_markup=force_save_keyboard
                 )
                 return
 
@@ -852,8 +860,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"─── • 💎 • ───\n\n"
                     f"🎯 <b>اطمینان سیستم:</b> <code>{conf:.1f}%</code>\n"
                     f"💡 <b>استدلال:</b> {explanation}"
-                    f"{old_preview}\n\n"
-                    f"❌ <i>به عنوان خبر جدید ذخیره نشد.</i>"
+                    f"{old_preview}",
+                    reply_markup=force_save_keyboard
                 )
                 return
 
@@ -865,14 +873,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"─── • 💎 • ───\n\n"
                     f"🎯 <b>اطمینان سیستم:</b> <code>{conf:.1f}%</code>\n"
                     f"💡 <b>استدلال:</b> {explanation}"
-                    f"{old_preview}\n\n"
-                    f"❌ <i>خبر در آرشیو ذخیره نشد.</i>"
+                    f"{old_preview}",
+                    reply_markup=force_save_keyboard
                 )
                 return
 
             elif reason == "ai_ambiguous":
-                context.user_data["pending_news"] = text
-                context.user_data["pending_image_hash"] = image_hash
                 keyboard = InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("✅ ثبت (خبر جدید)", callback_data="force_save"),
@@ -920,18 +926,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = await save_news(text, image_hash)
             await safe_edit_text(
                 query.message,
-                f"✅ <b>خبر با موفقیت ذخیره شد.</b>\n\n"
-                f"📦 <b>ظرفیت آرشیو:</b> <code>{total}/{ARCHIVE_SIZE}</code>"
+                f"📥 <b>خبر به صورت دستی در آرشیو ثبت گردید.</b>\n"
+                f"─── • 💎 • ───\n\n"
+                f"📦 <b>وضعیت کنونی آرشیو:</b> <code>{total}/{ARCHIVE_SIZE}</code>"
             )
             context.user_data.pop("pending_news", None)
             context.user_data.pop("pending_image_hash", None)
         else:
-            await safe_edit_text(query.message, "❌ <b>اطلاعات خبر منقضی شده است.</b>")
+            await safe_edit_text(query.message, "❌ <b>اطلاعات خبر منقضی شده است. لطفا مجددا ارسال کنید.</b>")
 
     elif query.data == "force_discard":
         context.user_data.pop("pending_news", None)
         context.user_data.pop("pending_image_hash", None)
-        await safe_edit_text(query.message, "🗑 <b>خبر به عنوان تکراری علامت خورد و رد شد.</b>")
+        await safe_edit_text(query.message, "🗑 <b>خبر به عنوان تکراری علامه‌گذاری و رد شد.</b>")
 
 # ============================================================
 # MAIN ENTRY POINT
@@ -955,7 +962,7 @@ def main():
         )
     )
 
-    logger.info("ربات هوشمند گیمفا با رابط کاربری جدید روشن شد...")
+    logger.info("ربات هوشمند گیمفا با قابلیت ذخیره‌سازی دستی اخبار تکراری روشن شد...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
