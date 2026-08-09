@@ -53,7 +53,7 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o")
 FAST_AI_MODEL = os.getenv("FAST_AI_MODEL", "gpt-4o-mini")
 
-# [ایده ۱] بازه زمانی اعتبار اخبار (بر حسب روز)
+# بازه زمانی اعتبار اخبار (بر حسب روز)
 MAX_NEWS_AGE_DAYS = int(os.getenv("MAX_NEWS_AGE_DAYS", "14"))
 MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))
 
@@ -302,7 +302,6 @@ def clean_gaming_text(text: str) -> str:
     text = DECORATION_PATTERN.sub(" ", text)
     return normalize(text)
 
-# [ایده ۳] استخراج اعداد، آمار و مقادیر کلیدی
 def extract_numbers(text: str) -> Set[str]:
     if not text:
         return set()
@@ -310,7 +309,6 @@ def extract_numbers(text: str) -> Set[str]:
     nums = re.findall(r'\b\d+(?:\.\d+)?\b', text_norm)
     return set(nums)
 
-# [ایده ۲] استخراج پیشرفته اسامی خاص (Named Entity Recognition - NER)
 def extract_entities(text: str) -> Set[str]:
     if not text:
         return set()
@@ -382,14 +380,13 @@ def extract_title(text: str) -> str:
     return title[:600]
 
 # ============================================================
-# [ایده ۶] ADVANCED IMAGE HASHING (CROP BORDERS)
+# ADVANCED IMAGE HASHING (CROP BORDERS)
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert('L')
         w, h = img.size
-        # برش ۱۵ درصدی از حاشیه‌ها جهت حذف لوگو/واترمارک‌های ثابت گیمفا
         img = img.crop((int(w * 0.15), int(h * 0.15), int(w * 0.85), int(h * 0.85)))
         img = img.resize((9, 8), Image.Resampling.LANCZOS)
         
@@ -591,7 +588,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
         clean_old = row["normalized"]
         clean_old_title = clean_gaming_text(row["title"] or "")
 
-        # [ایده ۱] فیلتر بازه زمانی (Time-Window Decay)
         created_at_str = row["created_at"]
         time_penalty = 1.0
         if created_at_str:
@@ -610,7 +606,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
 
         ner_score = entity_overlap_score(new_text, old_text)
 
-        # [ایده ۲] Guard عدم تطابق اسامی خاص (NER Guard)
         if ner_score < 0.15 and len(new_meta["entities"]) >= 2:
             ner_score *= 0.2
 
@@ -627,7 +622,6 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
             if set(new_meta["events"]) & set(old_meta["events"]):
                 meta_boost = 0.15
 
-        # [ایده ۳] بررسی جابه‌جایی اعداد
         if new_meta["numbers"] and old_meta["numbers"]:
             if new_meta["numbers"] != old_meta["numbers"] and ner_score > 0.40:
                 meta_boost += 0.10
@@ -643,11 +637,10 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
     return candidates[:MAX_AI_CANDIDATES]
 
 # ============================================================
-# CHECK DUPLICATE PIPELINE (2-STAGE VERIFICATION & DYNAMIC THRESHOLD)
+# CHECK DUPLICATE PIPELINE (WITH NUMERICAL CONFLICT GUARD)
 # ============================================================
 
 async def check_duplicate(text: str, image_hash: Optional[str] = None, image_bytes: Optional[bytes] = None) -> Dict[str, Any]:
-    # [ایده ۶] استخراج متن از تصویر با مدل بینایی و ترکیب با متن اولیه
     if image_bytes and len(text.split()) < 5:
         vision_text = await analyze_image_content(image_bytes)
         if vision_text:
@@ -657,11 +650,11 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     word_count = len(cleaned.split())
     fingerprint = sha256_hash(text)
     url = get_article_url(text)
+    new_meta = extract_metadata(text)
 
-    # [ایده ۵] حد آستانه پویا بر اساس طول متن (Dynamic Thresholding)
     required_conf = 0.60
     if word_count < 30:
-        required_conf = 0.75  # متن‌های بسیار کوتاه نیاز به اطمینان بالاتر دارند
+        required_conf = 0.75
 
     def fast_checks():
         with get_db() as conn:
@@ -678,14 +671,23 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
                 img_rows = conn.execute("SELECT * FROM news WHERE image_hash IS NOT NULL AND image_hash != '' ORDER BY id DESC LIMIT 50").fetchall()
                 for r in img_rows:
                     dist = hamming_distance(image_hash, r["image_hash"])
-                    if dist <= 5:  # سخت‌گیرانه‌تر شدن فاصله Hamming به دلیل Crop حاشیه‌ها
+                    if dist <= 5:
                         return {"duplicate": True, "reason": "image_match", "confidence": 0.95, "row": r}
 
             recent_rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT 50").fetchall()
             for r in recent_rows:
+                old_meta = extract_metadata(r["text"])
+                
+                # گارد تناقض اعداد: اگر اعداد دو خبر تفاوت داشته باشند، از اعلام تکراری در Fast Check صرف‌نظر شده و برای تحلیل به هوش مصنوعی می‌رود
+                has_num_conflict = False
+                if new_meta["numbers"] and old_meta["numbers"]:
+                    if new_meta["numbers"] != old_meta["numbers"]:
+                        has_num_conflict = True
+
                 overlap = entity_overlap_score(text, r["text"])
                 jaccard = word_jaccard(text, r["text"])
-                if overlap >= 0.75 and jaccard >= 0.50:
+
+                if not has_num_conflict and overlap >= 0.75 and jaccard >= 0.50:
                     return {"duplicate": True, "reason": "near_exact_text", "confidence": 0.95, "row": r}
 
         return None
@@ -697,8 +699,7 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     embedding = await make_embedding(cleaned)
     candidates = await asyncio.to_thread(get_candidates_sync, text, embedding)
 
-    # [ایده ۴] غربالگری دو مرحله‌ای (Two-Stage Verification)
-    stage1_candidates = [c for c in candidates if c[0] >= 0.25][:3]
+    stage1_candidates = [c for c in candidates if c[0] >= 0.20][:3]
 
     tasks = []
     candidate_meta = []
@@ -724,10 +725,19 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
         if best_decision:
             conf, result, row = best_decision
             
-            if result.duplicate and (result.match_type == MatchType.UPDATE_COVERAGE or conf >= required_conf):
+            if result.duplicate and (result.match_type == MatchType.UPDATE_COVERAGE or result.has_numerical_update):
                 return {
                     "duplicate": True,
-                    "reason": "ai_update" if (result.match_type == MatchType.UPDATE_COVERAGE or result.has_numerical_update) else "ai_high_confidence",
+                    "reason": "ai_update",
+                    "confidence": conf,
+                    "row": row,
+                    "explanation": result.explanation
+                }
+
+            if result.duplicate and conf >= required_conf:
+                return {
+                    "duplicate": True,
+                    "reason": "ai_high_confidence",
                     "confidence": conf,
                     "row": row,
                     "explanation": result.explanation
