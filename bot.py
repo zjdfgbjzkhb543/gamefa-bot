@@ -50,7 +50,6 @@ DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
 ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "150"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-# ارتقا به قوی‌ترین مدل هوش مصنوعی
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o")
 MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "8"))
 
@@ -93,14 +92,14 @@ EVENT_TYPES = [
 ]
 
 # ============================================================
-# MAIN REPLY KEYBOARD LAYOUT
+# MAIN REPLY KEYBOARD LAYOUT (UI REDESIGNED)
 # ============================================================
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🔍 بررسی خبر جدید"), KeyboardButton("📊 آمار آرشیو")],
-        [KeyboardButton("🧠 وضعیت AI"), KeyboardButton("📋 راهنما"), KeyboardButton("📦 وضعیت دیتابیس")],
-        [KeyboardButton("⚙️ تنظیمات"), KeyboardButton("💬 پشتیبانی"), KeyboardButton("👥 ادمین‌ها"), KeyboardButton("📜 قوانین")],
+        [KeyboardButton("🧠 وضعیت هوش مصنوعی"), KeyboardButton("📋 راهنما")],
+        [KeyboardButton("⚙️ تنظیمات سیستم"), KeyboardButton("👥 لیست مدیران")],
         [KeyboardButton("🗑 پاکسازی کامل آرشیو")]
     ],
     resize_keyboard=True
@@ -114,7 +113,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-logger = logging.getLogger("gamefa-max-engine")
+logger = logging.getLogger("gamefa-ui-engine")
 
 # ============================================================
 # OPENAI ASYNC CLIENT
@@ -411,7 +410,7 @@ def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]
     return [cosine_similarity(query_vector, v) for v in vectors]
 
 # ============================================================
-# VISION AI ANALYZER (GPT-4o Vision)
+# VISION AI ANALYZER
 # ============================================================
 
 async def analyze_image_content(image_bytes: bytes) -> str:
@@ -442,7 +441,7 @@ async def analyze_image_content(image_bytes: bytes) -> str:
         return ""
 
 # ============================================================
-# MAXIMUM ACCURACY AI COMPARATOR (Zero-Tolerance Policy)
+# AI COMPARATOR ENGINE
 # ============================================================
 
 async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
@@ -490,7 +489,7 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         )
         return response.choices[0].message.parsed
     except Exception as e:
-        logger.exception("AI Engine Maximum Compare error: %s", e)
+        logger.exception("AI Engine Compare error: %s", e)
         return None
 
 # ============================================================
@@ -685,12 +684,15 @@ def format_old_news_preview(row) -> str:
     if not row:
         return ""
     old_text = row["text"].strip()
-    preview = old_text[:200] + "..." if len(old_text) > 200 else old_text
+    preview = old_text[:220] + "..." if len(old_text) > 220 else old_text
     escaped_preview = html.escape(preview)
-    return f"\n\n📌 <b>خبر قبلی موجود در آرشیو:</b>\n«{escaped_preview}»"
+    return (
+        f"\n\n▫️▪️ <b>خبر مشابه در آرشیو:</b>\n"
+        f"<blockquote>«{escaped_preview}»</blockquote>"
+    )
 
 # ============================================================
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLERS (STYLISH UI)
 # ============================================================
 
 def is_allowed(update: Update) -> bool:
@@ -703,12 +705,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update) or not update.message:
         return
 
-    await safe_reply_text(
-        update.message,
-        "🤖 <b>ربات تشخیص خبر تکراری گیمفا (موتور GPT-4o)</b>\n\n"
-        "متن یا تصویر خبر را ارسال کنید:",
-        reply_markup=MAIN_KEYBOARD
+    welcome_text = (
+        "✨ <b>سامانه هوشمند پایش و تشخیص اخبار تکراری گیمفا</b>\n"
+        "─── • 💎 • ───\n\n"
+        "به دستیار ارزیابی اخبار خوش آمدید.\n"
+        "جهت بررسی، کافیست <b>متن خبر</b> یا <b>پوستر اختصاصی</b> را ارسال نمایید.\n\n"
+        "▪️ <i>مجهز به موتور پردازش چندلایه‌ای GPT-4o</i>\n"
+        "▪️ <i>پشتیبانی کامل از بینایی ماشین و تحلیل تصویر</i>"
     )
+
+    await safe_reply_text(update.message, welcome_text, reply_markup=MAIN_KEYBOARD)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update) or not update.message:
@@ -721,66 +727,79 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["📊 آمار آرشیو", "📦 وضعیت دیتابیس"]:
         with get_db() as conn:
             total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
-        await safe_reply_text(update.message, f"📊 <b>وضعیت دیتابیس و آرشیو:</b>\n\nتعداد اخبار ذخیره‌شده: <code>{total}/{ARCHIVE_SIZE}</code>")
+        
+        stat_text = (
+            "📊 <b>اطلاعات و وضعیت آرشیو</b>\n"
+            "─── • 💎 • ───\n\n"
+            f"📦 اخبار ذخیره‌شده: <code>{total}</code> از <code>{ARCHIVE_SIZE}</code>\n"
+            f"⚡ ظرفیت باقی‌مانده: <code>{ARCHIVE_SIZE - total}</code> خبر"
+        )
+        await safe_reply_text(update.message, stat_text)
         return
 
     elif text == "🗑 پاکسازی کامل آرشیو":
         if user_id != OWNER_ID:
             await safe_reply_text(
                 update.message,
-                "⛔ <b>دسترسی غیرمجاز!</b>\nعملیات پاکسازی کامل آرشیو فقط برای مالک اصلی ربات مجاز است."
+                "🚫 <b>دسترسی محدود شده است</b>\n\nعملیات پاکسازی آرشیو فقط توسط مالک اصلی سیستم قابل اجرا است."
             )
             return
 
         with get_db() as conn:
             conn.execute("DELETE FROM news")
             conn.commit()
-        await safe_reply_text(update.message, "🗑 <b>آرشیو دیتابیس با موفقیت پاکسازی شد.</b>", reply_markup=MAIN_KEYBOARD)
+
+        await safe_reply_text(
+            update.message,
+            "🗑 <b>آرشیو اخبار با موفقیت پاکسازی شد.</b>",
+            reply_markup=MAIN_KEYBOARD
+        )
         return
 
     elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
-        await safe_reply_text(
-            update.message,
-            "ℹ️ <b>راهنمای ربات:</b>\n\n"
-            "• مجهز به مدل GPT-4o با آستانه حساسیّت بسیار بالا.\n"
-            "• کوچک‌ترین تشابه در سوژه یا اخبار مکمل به سرعت شناسایی می‌شوند."
+        guide_text = (
+            "📋 <b>راهنمای عملکردهای هوشمند:</b>\n"
+            "─── • 💎 • ───\n\n"
+            "🔹 <b>ارسال متن:</b> متن خبر را مستقیم ارسال کنید تا با کل دیتابیس تطبیق داده شود.\n"
+            "🔹 <b>ارسال پوستر:</b> تصاویر حاوی متن با مدل بینایی بررسی می‌شوند.\n"
+            "🔹 <b>تشخیص اخبار مکمل:</b> مصاحبه‌های چندبخشی و بازنویسی‌ها خودکار مسدود می‌شوند."
         )
+        await safe_reply_text(update.message, guide_text)
         return
 
-    elif text == "🧠 وضعیت AI":
-        status_ai = "🟢 فعال (GPT-4o Maximum Engine)" if openai_client else "🔴 غیرفعال"
-        await safe_reply_text(
-            update.message,
-            f"🧠 <b>وضعیت موتور هوش مصنوعی:</b>\n\n"
-            f"• وضعیت اتصال: {status_ai}\n"
-            f"• مدل اصلی: <code>{AI_MODEL}</code>\n"
-            f"• مدل Embedding: <code>{EMBEDDING_MODEL}</code>"
+    elif text == "🧠 وضعیت هوش مصنوعی":
+        status_ai = "🟢 فعال و آماده‌به‌کار" if openai_client else "🔴 غیرفعال"
+        ai_text = (
+            "🧠 <b>مشخصات موتور هوش مصنوعی</b>\n"
+            "─── • 💎 • ───\n\n"
+            f"🔹 <b>وضعیت اتصال:</b> {status_ai}\n"
+            f"🔹 <b>مدل اصلی تحلیل:</b> <code>{AI_MODEL}</code>\n"
+            f"🔹 <b>مدل ساختار برداری:</b> <code>{EMBEDDING_MODEL}</code>\n"
+            f"🔹 <b>معماری تحلیل:</b> <code>Chain-of-Thought Strict</code>"
         )
+        await safe_reply_text(update.message, ai_text)
         return
 
-    elif text == "⚙️ تنظیمات":
-        await safe_reply_text(
-            update.message,
-            f"⚙️ <b>تنظیمات فعلی ربات:</b>\n\n"
-            f"• حداکثر ظرفیت آرشیو: <code>{ARCHIVE_SIZE}</code> خبر\n"
-            f"• مالک ربات: <code>{OWNER_ID}</code>"
+    elif text == "⚙️ تنظیمات سیستم":
+        settings_text = (
+            "⚙️ <b>تنظیمات و زیرساخت فنی</b>\n"
+            "─── • 💎 • ───\n\n"
+            f"🔸 <b>حداکثر سقف آرشیو:</b> <code>{ARCHIVE_SIZE}</code>\n"
+            f"🔸 <b>شناسه مالک:</b> <code>{OWNER_ID}</code>\n"
+            f"🔸 <b>پایگاه داده:</b> <code>SQLite WAL Mode</code>"
         )
+        await safe_reply_text(update.message, settings_text)
         return
 
-    elif text == "💬 پشتیبانی":
-        await safe_reply_text(update.message, "💬 <b>پشتیبانی:</b>\nجهت برقراری ارتباط به ادمین پیام دهید.")
-        return
-
-    elif text == "👥 ادمین‌ها":
-        admins_str = ", ".join(map(str, ADMIN_IDS))
-        await safe_reply_text(update.message, f"👥 <b>مدیریت دسترسی:</b>\n\n• مالک اصلی: <code>{OWNER_ID}</code>\n• ادمین‌ها: <code>{admins_str}</code>")
-        return
-
-    elif text == "📜 قوانین":
-        await safe_reply_text(
-            update.message,
-            "📜 <b>قوانین بررسی اخبار:</b>\n\nهرگونه خبر موازی، خلاصه، یا مکمل یک رویداد بلافاصله غیرمجاز شناسایی می‌شود."
+    elif text == "👥 لیست مدیران":
+        admins_str = "\n".join([f"• <code>{aid}</code>" for aid in ADMIN_IDS if aid != 0])
+        admin_text = (
+            "👥 <b>مدیریت و دسترسی‌های مجاز</b>\n"
+            "─── • 💎 • ───\n\n"
+            f"👑 <b>مالک اصلی:</b>\n• <code>{OWNER_ID}</code>\n\n"
+            f"🛡 <b>ادمین‌های سیستم:</b>\n{admins_str if admins_str else '• موردی تعریف نشده است.'}"
         )
+        await safe_reply_text(update.message, admin_text)
         return
 
     image_hash = None
@@ -795,7 +814,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and not image_hash:
         return
 
-    status = await safe_reply_text(update.message, "⚡ در حال آنالیز فوق دقیق با موتور GPT-4o...")
+    status = await safe_reply_text(update.message, "⏳ <b>در حال پردازش و استدلال هوشمند...</b>")
 
     try:
         result = await check_duplicate(text, image_hash, image_bytes)
@@ -806,22 +825,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             old_preview = format_old_news_preview(result.get("row"))
 
             if reason in ["exact_hash", "exact_url", "near_exact_text"]:
-                await safe_edit_text(status, f"♻️ <b>خبر کاملاً تکراری است</b>{old_preview}\n\n⛔ خبر ذخیره نشد.")
+                await safe_edit_text(
+                    status,
+                    f"⛔ <b>خبر کاملاً تکراری است</b>\n"
+                    f"─── • 💎 • ───"
+                    f"{old_preview}\n\n"
+                    f"❌ <i>خبر در آرشیو ذخیره نشد.</i>"
+                )
                 return
 
             elif reason == "image_match":
-                await safe_edit_text(status, f"🖼 <b>کاور تصویر تکراری است</b>{old_preview}\n\n⛔ خبر ذخیره نشد.")
+                await safe_edit_text(
+                    status,
+                    f"🖼 <b>پوستر خبر تکراری است</b>\n"
+                    f"─── • 💎 • ───"
+                    f"{old_preview}\n\n"
+                    f"❌ <i>خبر در آرشیو ذخیره نشد.</i>"
+                )
                 return
 
             elif reason == "ai_update":
                 explanation = html.escape(result.get("explanation", ""))
                 await safe_edit_text(
                     status,
-                    f"ℹ️ <b>این خبر پوشش تکمیلی / بازنویسی خبر قبلی است</b>\n\n"
-                    f"🎯 اطمینان AI: {conf:.1f}%\n"
-                    f"💡 دلیل AI: {explanation}"
+                    f"🔄 <b>پوشش موازی / تکمیلی خبر قبلی</b>\n"
+                    f"─── • 💎 • ───\n\n"
+                    f"🎯 <b>اطمینان سیستم:</b> <code>{conf:.1f}%</code>\n"
+                    f"💡 <b>استدلال:</b> {explanation}"
                     f"{old_preview}\n\n"
-                    f"⛔ به عنوان خبر جدید ذخیره نشد."
+                    f"❌ <i>به عنوان خبر جدید ذخیره نشد.</i>"
                 )
                 return
 
@@ -829,11 +861,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 explanation = html.escape(result.get("explanation", ""))
                 await safe_edit_text(
                     status,
-                    f"♻️ <b>خبر تکراری است</b>\n\n"
-                    f"🎯 اطمینان AI: {conf:.1f}%\n"
-                    f"💡 تحلیل AI: {explanation}"
+                    f"⛔ <b>خبر تکراری تشخیص داده شد</b>\n"
+                    f"─── • 💎 • ───\n\n"
+                    f"🎯 <b>اطمینان سیستم:</b> <code>{conf:.1f}%</code>\n"
+                    f"💡 <b>استدلال:</b> {explanation}"
                     f"{old_preview}\n\n"
-                    f"⛔ خبر ذخیره نشد."
+                    f"❌ <i>خبر در آرشیو ذخیره نشد.</i>"
                 )
                 return
 
@@ -842,18 +875,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["pending_image_hash"] = image_hash
                 keyboard = InlineKeyboardMarkup([
                     [
-                        InlineKeyboardButton("✅ ذخیره شود (خبر جدید)", callback_data="force_save"),
-                        InlineKeyboardButton("❌ رد شود (تکراری)", callback_data="force_discard")
+                        InlineKeyboardButton("✅ ثبت (خبر جدید)", callback_data="force_save"),
+                        InlineKeyboardButton("❌ رد (خبر تکراری)", callback_data="force_discard")
                     ]
                 ])
                 explanation = html.escape(result.get("explanation", ""))
                 await safe_edit_text(
                     status,
-                    f"⚠️ <b>نیازمند بررسی ادمین</b>\n\n"
-                    f"🎯 میزان شباهت: {conf:.1f}%\n"
-                    f"💡 تحلیل AI: {explanation}"
+                    f"⚠️ <b>نیازمند بررسی ادمین</b>\n"
+                    f"─── • 💎 • ───\n\n"
+                    f"🎯 <b>درصد تشابه:</b> <code>{conf:.1f}%</code>\n"
+                    f"💡 <b>استدلال:</b> {explanation}"
                     f"{old_preview}\n\n"
-                    f"آیا خبر ذخیره شود؟",
+                    f"تصمیم نهایی را انتخاب کنید:",
                     reply_markup=keyboard
                 )
                 return
@@ -861,15 +895,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = await save_news(text, image_hash)
         await safe_edit_text(
             status,
-            f"🆕 <b>خبر جدید است</b>\n\n"
-            f"✅ ذخیره شد.\n"
-            f"📦 آرشیو: {total}/{ARCHIVE_SIZE}"
+            f"✅ <b>خبر جدید است</b>\n"
+            f"─── • 💎 • ───\n\n"
+            f"📌 با موفقیت آنالیز و در دیتابیس ثبت گردید.\n"
+            f"📦 <b>وضعیت آرشیو:</b> <code>{total}/{ARCHIVE_SIZE}</code>"
         )
 
     except Exception as e:
         logger.exception("Processing Error")
         escaped_err = html.escape(str(e))
-        await safe_edit_text(status, f"❌ خطا در پردازش:\n<code>{escaped_err}</code>")
+        await safe_edit_text(status, f"❌ <b>خطا در سامانه:</b>\n<code>{escaped_err}</code>")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -886,17 +921,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_text(
                 query.message,
                 f"✅ <b>خبر با موفقیت ذخیره شد.</b>\n\n"
-                f"📦 ظرفیت آرشیو: {total}/{ARCHIVE_SIZE}"
+                f"📦 <b>ظرفیت آرشیو:</b> <code>{total}/{ARCHIVE_SIZE}</code>"
             )
             context.user_data.pop("pending_news", None)
             context.user_data.pop("pending_image_hash", None)
         else:
-            await safe_edit_text(query.message, "❌ <b>اطلاعات خبر یافت نشد یا منقضی شده است.</b>")
+            await safe_edit_text(query.message, "❌ <b>اطلاعات خبر منقضی شده است.</b>")
 
     elif query.data == "force_discard":
         context.user_data.pop("pending_news", None)
         context.user_data.pop("pending_image_hash", None)
-        await safe_edit_text(query.message, "🗑 <b>خبر تکراری تشخیص داده شد و ذخیره نگردید.</b>")
+        await safe_edit_text(query.message, "🗑 <b>خبر به عنوان تکراری علامت خورد و رد شد.</b>")
 
 # ============================================================
 # MAIN ENTRY POINT
@@ -920,7 +955,7 @@ def main():
         )
     )
 
-    logger.info("ربات با موتور GPT-4o به طور کامل آماده به کار است...")
+    logger.info("ربات هوشمند گیمفا با رابط کاربری جدید روشن شد...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
