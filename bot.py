@@ -10,6 +10,7 @@ import hashlib
 import logging
 import asyncio
 import unicodedata
+from enum import Enum
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 from difflib import SequenceMatcher
@@ -42,17 +43,14 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-# شناسه ادمین‌ها (می‌توانید چندین آیدی را با کاما جدا کنید مثلاً "123,456")
 ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_ID", "0").split(",") if i.strip().isdigit()]
-
-# شناسه انحصاری مالک اصلی (فقط این آیدی حق پاکسازی آرشیو را دارد)
 OWNER_ID = 8202357756
 
 DB_FILE = os.getenv("DB_FILE", "gamefa_duplicate.db")
 ARCHIVE_SIZE = int(os.getenv("ARCHIVE_SIZE", "150"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
-MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "5"))
+MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "6"))
 
 # ============================================================
 # GAMING ALIASES MAPPING
@@ -125,7 +123,7 @@ if OPENAI_API_KEY:
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # ============================================================
-# SAFE TELEGRAM MESSAGE SENDER (PREVENT ENTITY PARSE ERRORS)
+# SAFE TELEGRAM MESSAGE SENDER
 # ============================================================
 
 async def safe_reply_text(message, text: str, reply_markup=None, parse_mode: str = "HTML"):
@@ -149,19 +147,22 @@ async def safe_edit_text(message, text: str, reply_markup=None, parse_mode: str 
         raise e
 
 # ============================================================
-# AI SCHEMA
+# ENHANCED AI SCHEMA (Chain of Thought & Enums)
 # ============================================================
 
+class MatchType(str, Enum):
+    EXACT_DUPLICATE = "exact_duplicate"
+    UPDATE_COVERAGE = "update_coverage"
+    DIFFERENT_NEWS = "different_news"
+
 class AIResult(BaseModel):
-    news_a_core: str = Field(description="حقایق کلیدی خبر جدید")
-    news_b_core: str = Field(description="حقایق کلیدی خبر آرشیوی")
-    key_differences: str = Field(description="تفاوت‌های بنیادی")
-    same_event: bool = Field(description="آیا رویداد خبری یا تیتر یکسان است؟")
-    same_claim: bool = Field(description="آیا موضوع اصلی یکی است؟")
-    duplicate: bool = Field(description="آیا خبر تکراری است؟")
-    is_update: bool = Field(description="آیا این خبر یک پوشش تکمیلی یا بروزرسانی خبر قبلی است؟")
-    confidence: float = Field(description="اطمینان بین 0.0 تا 1.0")
-    explanation: str = Field(description="توضیح کوتاه به فارسی")
+    reasoning_step: str = Field(description="استدلال گام به گام تحلیل دو خبر و بررسی رویداد/مصاحبه مشترک")
+    news_a_core_entity: str = Field(description="نام بازی/شخص/کمپانی اصلی در خبر جدید")
+    news_b_core_entity: str = Field(description="نام بازی/شخص/کمپانی اصلی در خبر آرشیو")
+    match_type: MatchType = Field(description="نوع مطابقت خبر")
+    duplicate: bool = Field(description="آیا خبر تکراری یا پوشش موازی است؟")
+    confidence: float = Field(description="درصد اطمینان بین 0.0 تا 1.0")
+    explanation: str = Field(description="توضیح بسیار کوتاه و خلاصه علت تصمیم به فارسی")
 
 # ============================================================
 # DATABASE SETUP
@@ -197,7 +198,7 @@ def init_db():
         conn.commit()
 
 # ============================================================
-# PERSIAN GAMING PRE-PROCESSING & STOPWORDS
+# PERSIAN GAMING PRE-PROCESSING
 # ============================================================
 
 PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -250,7 +251,7 @@ def clean_gaming_text(text: str) -> str:
     return normalize(text)
 
 # ============================================================
-# METADATA EXTRACTION & ENTITY MATCHING
+# METADATA & ENTITIES EXTRACTION
 # ============================================================
 
 def extract_metadata(text: str) -> Dict[str, Any]:
@@ -267,10 +268,8 @@ def extract_entities(text: str) -> set:
         return set()
     cleaned = clean_gaming_text(text)
     words = cleaned.split()
-    
     persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 2)
     eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{1,}\b', text))
-    
     return persian_entities | eng_entities
 
 def entity_overlap_score(text1: str, text2: str) -> float:
@@ -324,7 +323,7 @@ def extract_title(text: str) -> str:
     return title[:600]
 
 # ============================================================
-# ROBUST IMAGE PERCEPTUAL HASHING
+# IMAGE PERCEPTUAL HASHING
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
@@ -360,7 +359,7 @@ def hamming_distance(h1: str, h2: str) -> int:
     return sum(c1 != c2 for c1, c2 in zip(h1, h2))
 
 # ============================================================
-# VECTOR SEARCH & PURE PYTHON MATH
+# VECTOR SEARCH & MATHEMATICAL SIMILARITY
 # ============================================================
 
 def sequence_similarity(a: str, b: str) -> float:
@@ -410,7 +409,7 @@ def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]
     return [cosine_similarity(query_vector, v) for v in vectors]
 
 # ============================================================
-# VISION AI FOR SHORT TEXT
+# VISION AI ANALYZER
 # ============================================================
 
 async def analyze_image_content(image_bytes: bytes) -> str:
@@ -424,7 +423,7 @@ async def analyze_image_content(image_bytes: bytes) -> str:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "متن و موضوع اصلی موجود در این تصویر خبری گیمینگ را به صورت خلاصه توضیح بده:"},
+                        {"type": "text", "text": "متن و موضوع اصلی گیمینگ موجود در این پوستر/تصویر را به اختصار بیان کن:"},
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
@@ -440,7 +439,7 @@ async def analyze_image_content(image_bytes: bytes) -> str:
         return ""
 
 # ============================================================
-# FEW-SHOT PROMPTING AI JUDGE
+# HIGHLY OPTIMIZED ADVANCED AI COMPARATOR
 # ============================================================
 
 async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
@@ -448,26 +447,32 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         return None
 
     system_prompt = """
-تو موتور هوشمند تشخیص اخبار تکراری رسانه گیمفا هستی.
-تکلیف: تشخیص بده آیا این دو خبر مربوط به یک موضوع، رویداد، مصاحبه یا واکنش یکسان هستند یا خیر.
+شما سیستم تخصصی آنالیز اخبار رسانه گیمفا (Gamefa) هستید.
+وظیفه شما بررسی بسیار دقیق دو خبر برای تشخیص تکراری بودن یا پوشش موازی یک رویداد است.
 
-قوانین تشخیص:
-۱. بازنویسی تیترها (Paraphrasing): اگر دو خبر در مورد یک مصاحبه، یک شخص (مثلا خالق بازی) یا یک رویداد یکسان صحبت می‌کنند (حتی اگر یکی کلی‌تر و دیگری جزیی‌تر باشد)، این اخبار duplicate = true هستند.
-۲. نظر و واکنش: اگر هر دو خبر درباره نظر یک شخص درباره یک بازی/بتا هستند، حتماً تکراری محسوب می‌شوند.
-۳. پوشش موازی: اگر خبر دوم تکمیل‌کننده یا تیتر دیگری از همان مصاحبه/خبر باشد، is_update = true و duplicate = true بگذار.
-۴. اسامی و اعداد: اگر نام شرکت/بازی و عدد کلیدی خبر یکسان باشد، حتماً تکراری است.
+راهنمای استدلال گام‌به‌گام (Chain of Thought):
+۱. ابتدا entityهای اصلی (نام بازی، نام بازیساز، کمپانی، کنسول، یا شخص) را مشخص کن.
+۲. بررسی کن آیا هر دو خبر به یک "مصاحبه"، "رویداد"، "واکنش"، "تیزر/تریلر"، "سیستم پیشنهادی" یا "توییت" یکسان اشاره دارند یا خیر.
+۳. در صورت یکسان بودن منبع یا موضوع (حتی اگر تیتر خبر اول جزیی‌تر و خبر دوم کلی‌تر باشد یا بازنویسی کامل شده باشد)، خبر تکراری/پوشش تکمیلی است.
+
+قواعد تصمیم‌گیری:
+- match_type = "exact_duplicate": اگر دو خبر عیناً یک رویداد/مصاحبه/واکنش را پوشش می‌دهند.
+- match_type = "update_coverage": اگر خبر دوم مکمل، جزئیات بیشتر یا اخبار بعدی همان موضوع قبلی است.
+- match_type = "different_news": اگر دو خبر کاملاً به دو موضوع یا دو بازی/رویداد متفاوت مربوط هستند.
+
+* نکته مهم: اگر duplicate برابر true باشد، match_type نباید different_news باشد.
 """
 
     user_prompt = f"""
-خبر جدید:
-----------------
+[خبر جدید جهت بررسی]:
 {new_text[:8000]}
-----------------
-خبر آرشیوی:
-----------------
+
+----------------------------------------
+
+[خبر موجود در آرشیو]:
 {old_text[:8000]}
-----------------
 """
+
     try:
         response = await openai_client.beta.chat.completions.parse(
             model=AI_MODEL,
@@ -479,11 +484,11 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
         )
         return response.choices[0].message.parsed
     except Exception as e:
-        logger.exception("AI Reasoning error: %s", e)
+        logger.exception("AI Compare Engine error: %s", e)
         return None
 
 # ============================================================
-# CANDIDATES SELECTION
+# CANDIDATE SELECTION WITH HYBRID WEIGHTING
 # ============================================================
 
 def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
@@ -542,9 +547,9 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
                 meta_boost = 0.15
 
         ranking = ((effective_title * 0.35) + (semantic * 0.35) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
-        
-        if ner_score >= 0.40:
-            ranking += 0.20
+
+        if ner_score >= 0.35:
+            ranking += 0.25
 
         candidates.append((ranking, semantic, lexical, ner_score, row))
 
@@ -552,7 +557,7 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
     return candidates[:MAX_AI_CANDIDATES]
 
 # ============================================================
-# PIPELINE MAIN CHECK
+# CHECK DUPLICATE PIPELINE
 # ============================================================
 
 async def check_duplicate(text: str, image_hash: Optional[str] = None, image_bytes: Optional[bytes] = None) -> Dict[str, Any]:
@@ -625,14 +630,23 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
         if best_decision:
             conf, result, row = best_decision
             
-            if result.duplicate and result.is_update and conf >= 0.70:
-                return {"duplicate": True, "reason": "ai_update", "confidence": conf, "row": row, "explanation": result.explanation}
-                
-            if result.duplicate and (result.same_event or result.same_claim) and conf >= 0.70:
-                return {"duplicate": True, "reason": "ai_high_confidence", "confidence": conf, "row": row, "explanation": result.explanation}
-                
-            if result.duplicate and conf >= 0.60:
-                return {"duplicate": True, "reason": "ai_ambiguous", "confidence": conf, "row": row, "explanation": result.explanation}
+            if result.duplicate and (result.match_type == MatchType.UPDATE_COVERAGE or conf >= 0.65):
+                return {
+                    "duplicate": True,
+                    "reason": "ai_update" if result.match_type == MatchType.UPDATE_COVERAGE else "ai_high_confidence",
+                    "confidence": conf,
+                    "row": row,
+                    "explanation": result.explanation
+                }
+            
+            if result.duplicate and conf >= 0.55:
+                return {
+                    "duplicate": True,
+                    "reason": "ai_ambiguous",
+                    "confidence": conf,
+                    "row": row,
+                    "explanation": result.explanation
+                }
 
     return {"duplicate": False, "reason": "new_news", "confidence": 0.0, "row": None}
 
@@ -670,7 +684,7 @@ def format_old_news_preview(row) -> str:
     return f"\n\n📌 <b>خبر قبلی موجود در آرشیو:</b>\n«{escaped_preview}»"
 
 # ============================================================
-# TELEGRAM HANDLERS (WITH PERMISSION & FALLBACK)
+# TELEGRAM HANDLERS
 # ============================================================
 
 def is_allowed(update: Update) -> bool:
@@ -685,8 +699,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await safe_reply_text(
         update.message,
-        "🤖 <b>ربات پیشرفته تشخیص خبر تکراری گیمفا</b>\n\n"
-        "متن یا تصویر خبر را بفرستید تا آنالیز ۶ لایه‌ای انجام شود:",
+        "🤖 <b>ربات هوشمند تشخیص خبر تکراری گیمفا (موتور ارتقایافته AI)</b>\n\n"
+        "متن یا تصویر خبر را جهت پردازش ارسال کنید:",
         reply_markup=MAIN_KEYBOARD
     )
 
@@ -721,20 +735,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text in ["📋 راهنما", "🔍 بررسی خبر جدید"]:
         await safe_reply_text(
             update.message,
-            "ℹ️ <b>راهنمای استفاده از ربات:</b>\n\n"
-            "• کافیست متن یا تصویر پست جدید تلگرام را ارسال کنید.\n"
-            "• ربات آن را در ۶ لایه آنالیز کرده و اسامی گیمینگ، پلتفرم‌ها و کاور را تطبیق می‌دهد.\n"
-            "• در صورت تکراری بودن، متن خبر قبلی آرشیو شده به همراه دلیل نمایش داده خواهد شد."
+            "ℹ️ <b>راهنمای ربات ارتقایافته:</b>\n\n"
+            "• تحلیل هوشمند به همراه Chain of Thought و استدلال گام به گام.\n"
+            "• تشخیص بازنویسی کامل، تفاوت‌های جزیی تیتر و پوشش مکمل اخبار."
         )
         return
 
     elif text == "🧠 وضعیت AI":
-        status_ai = "🟢 فعال" if openai_client else "🔴 غیرفعال (کلید API تنظیم نشده)"
+        status_ai = "🟢 فعال (نسخه پیشرفته Chain-of-Thought)" if openai_client else "🔴 غیرفعال"
         await safe_reply_text(
             update.message,
             f"🧠 <b>وضعیت موتور هوش مصنوعی:</b>\n\n"
             f"• وضعیت اتصال: {status_ai}\n"
-            f"• مدل پردازش متنی و Vision: <code>{AI_MODEL}</code>\n"
+            f"• مدل پردازش: <code>{AI_MODEL}</code>\n"
             f"• مدل Embedding: <code>{EMBEDDING_MODEL}</code>"
         )
         return
@@ -744,26 +757,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.message,
             f"⚙️ <b>تنظیمات فعلی ربات:</b>\n\n"
             f"• حداکثر ظرفیت آرشیو: <code>{ARCHIVE_SIZE}</code> خبر\n"
-            f"• شناسه مالک اصلی: <code>{OWNER_ID}</code>\n"
-            f"• مدل هوش مصنوعی: <code>{AI_MODEL}</code>"
+            f"• مالک ربات: <code>{OWNER_ID}</code>"
         )
         return
 
     elif text == "💬 پشتیبانی":
-        await safe_reply_text(update.message, "💬 <b>پشتیبانی و ارتباط:</b>\n\nجهت گزارش مشکلات با توسعه‌دهنده در ارتباط باشید.")
+        await safe_reply_text(update.message, "💬 <b>پشتیبانی:</b>\nجهت برقراری ارتباط به ادمین پیام دهید.")
         return
 
     elif text == "👥 ادمین‌ها":
         admins_str = ", ".join(map(str, ADMIN_IDS))
-        await safe_reply_text(update.message, f"👥 <b>مدیریت دسترسی:</b>\n\n• مالک اصلی: <code>{OWNER_ID}</code>\n• شناسه ادمین‌ها: <code>{admins_str}</code>")
+        await safe_reply_text(update.message, f"👥 <b>مدیریت دسترسی:</b>\n\n• مالک اصلی: <code>{OWNER_ID}</code>\n• ادمین‌ها: <code>{admins_str}</code>")
         return
 
     elif text == "📜 قوانین":
         await safe_reply_text(
             update.message,
-            "📜 <b>قوانین و ضوابط بررسی اخبار:</b>\n\n"
-            "۱. اخبار تکراری حتی با تغییر کلمات، بازنویسی یا نام‌های مترادف شناسایی خواهند شد.\n"
-            "۲. اخبار تکمیلی و بروزرسانی‌ها (Update) به عنوان خبر تکراری شناسایی می‌شوند."
+            "📜 <b>قوانین بررسی اخبار:</b>\n\nاخبار هم‌موضوع، هم‌رویداد و یا پوشش چندبخشی یک مصاحبه به‌طور خودکار تکراری تشخیص داده می‌شوند."
         )
         return
 
@@ -779,7 +789,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text and not image_hash:
         return
 
-    status = await safe_reply_text(update.message, "🔎 در حال آنالیز ۶ لایه‌ای (کاور، اسامی گیمینگ، متادیتا و AI)...")
+    status = await safe_reply_text(update.message, "🧠 در حال آنالیز هوشمند متنی و ساختاری خبر...")
 
     try:
         result = await check_duplicate(text, image_hash, image_bytes)
@@ -789,23 +799,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reason = result["reason"]
             old_preview = format_old_news_preview(result.get("row"))
 
-            if reason in ["exact_hash", "exact_url", "near_exact_text", "title_exact_match"]:
-                await safe_edit_text(status, f"♻️ <b>خبر کاملاً تکراری است</b> (اطمینان بالا){old_preview}\n\n⛔ خبر ذخیره نشد.")
+            if reason in ["exact_hash", "exact_url", "near_exact_text"]:
+                await safe_edit_text(status, f"♻️ <b>خبر کاملاً تکراری است</b>{old_preview}\n\n⛔ خبر ذخیره نشد.")
                 return
 
             elif reason == "image_match":
-                await safe_edit_text(status, f"🖼 <b>کاور/تصویر خبر تکراری است</b>{old_preview}\n\n⛔ خبر ذخیره نشد.")
+                await safe_edit_text(status, f"🖼 <b>کاور تصویر تکراری است</b>{old_preview}\n\n⛔ خبر ذخیره نشد.")
                 return
 
             elif reason == "ai_update":
                 explanation = html.escape(result.get("explanation", ""))
                 await safe_edit_text(
                     status,
-                    f"ℹ️ <b>این پست بروزرسانی / پوشش تکمیلی خبر قبلی است</b>\n\n"
-                    f"🎯 درصد شباهت: {conf:.1f}%\n"
-                    f"💡 تحلیل AI: {explanation}"
+                    f"ℹ️ <b>این خبر پوشش تکمیلی / بازنویسی خبر قبلی است</b>\n\n"
+                    f"🎯 اطمینان هوش مصنوعی: {conf:.1f}%\n"
+                    f"💡 دلیل AI: {explanation}"
                     f"{old_preview}\n\n"
-                    f"⛔ به عنوان خبر مستقل ذخیره نشد."
+                    f"⛔ به عنوان خبر جدید ذخیره نشد."
                 )
                 return
 
@@ -814,8 +824,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_text(
                     status,
                     f"♻️ <b>خبر تکراری است</b>\n\n"
-                    f"🎯 درصد اطمینان: {conf:.1f}%\n"
-                    f"💡 دلیل AI: {explanation}"
+                    f"🎯 اطمینان هوش مصنوعی: {conf:.1f}%\n"
+                    f"💡 تحلیل AI: {explanation}"
                     f"{old_preview}\n\n"
                     f"⛔ خبر ذخیره نشد."
                 )
@@ -834,7 +844,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_edit_text(
                     status,
                     f"⚠️ <b>نیازمند بررسی ادمین</b>\n\n"
-                    f"🎯 درصد شباهت: {conf:.1f}%\n"
+                    f"🎯 میزان شباهت: {conf:.1f}%\n"
                     f"💡 تحلیل AI: {explanation}"
                     f"{old_preview}\n\n"
                     f"آیا خبر ذخیره شود؟",
@@ -895,7 +905,6 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(
@@ -905,7 +914,7 @@ def main():
         )
     )
 
-    logger.info("ربات تشخیص خبر تکراری گیمفا با موفقیت روشن شد...")
+    logger.info("ربات هوشمند گیمفا با موتور ارتقایافته هوش مصنوعی روشن شد...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
