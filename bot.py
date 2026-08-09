@@ -48,7 +48,7 @@ AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 MAX_AI_CANDIDATES = int(os.getenv("MAX_AI_CANDIDATES", "5"))
 
 # ============================================================
-# GAMING ALIASES MAPPING (Idea #1)
+# GAMING ALIASES MAPPING
 # ============================================================
 
 GAME_ALIASES = {
@@ -82,7 +82,7 @@ GAME_ALIASES = {
 
 EVENT_TYPES = [
     "سیستم پیشنهادی", "سیستم مورد نیاز", "تاریخ انتشار", "تریلر",
-    "ویدیو", "تاخیر", "شایعه", "کد تخفیف", "آپدیت", "پچ", "قیمت", "فروش"
+    "ویدیو", "تاخیر", "شایعه", "کد تخفیف", "آپدیت", "پچ", "قیمت", "فروش", "مدت زمان"
 ]
 
 # ============================================================
@@ -166,7 +166,7 @@ def init_db():
         conn.commit()
 
 # ============================================================
-# PERSIAN GAMING PRE-PROCESSING & ALIAS NORMALIZATION
+# PERSIAN GAMING PRE-PROCESSING & STOPWORDS
 # ============================================================
 
 PERSIAN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -182,9 +182,13 @@ DECORATION_PATTERN = re.compile(
     r'[-=_*~•▪️▫️🔹🔸🔻🔺🔴🟢🟡⚡️🔥💎📌📍📝📢📣💡🎮🟣🆔]+'
 )
 
+# کلمات عمومی و قالبی تیترهای خبری که نباید ملاک تشابه قرار گیرند
 PERSIAN_STOPWORDS = {
     "در", "یک", "از", "به", "با", "که", "را", "روی", "بر", "برای", "شد", "کرد",
-    "است", "بود", " شد", "این", "آن", "هم", "نیز", "تا", "چون", "باید", "ستاره"
+    "است", "بود", "این", "آن", "هم", "نیز", "تا", "چون", "باید", "ستاره",
+    "مدت", "زمان", "فیلم", "بازی", "جدید", "مشخص", "نهایی", "اعلام", "انتشار",
+    "تاریخ", "تریلر", "پوستر", "ویدیو", "تصویر", "عکس", "دانلود", "تماشا",
+    "کنید", "رسما", "رسمی", "شایعه", "تایید", "پوشش", "اخبار", "خبر"
 }
 
 def normalize(text: str) -> str:
@@ -216,7 +220,7 @@ def clean_gaming_text(text: str) -> str:
     return normalize(text)
 
 # ============================================================
-# METADATA EXTRACTION (Idea #3)
+# METADATA EXTRACTION
 # ============================================================
 
 def extract_metadata(text: str) -> Dict[str, Any]:
@@ -234,11 +238,11 @@ def extract_entities(text: str) -> set:
     cleaned = clean_gaming_text(text)
     words = cleaned.split()
     
-    persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 3)
+    # استخراج کلمات کلیدی اصلی و فیلتر کردن تمام کلمات قالبی
+    persian_entities = set(w for w in words if w not in PERSIAN_STOPWORDS and len(w) >= 2)
     eng_entities = set(w.lower() for w in re.findall(r'\b[a-zA-Z0-9]{2,}\b', text))
-    numbers = set(re.findall(r'\b\d+\b', text))
     
-    return persian_entities | eng_entities | numbers
+    return persian_entities | eng_entities
 
 def entity_overlap_score(text1: str, text2: str) -> float:
     e1 = extract_entities(text1)
@@ -291,7 +295,7 @@ def extract_title(text: str) -> str:
     return title[:600]
 
 # ============================================================
-# ROBUST IMAGE PERCEPTUAL HASHING (Idea #2)
+# ROBUST IMAGE PERCEPTUAL HASHING
 # ============================================================
 
 def compute_image_hash(image_bytes: bytes) -> str:
@@ -327,7 +331,7 @@ def hamming_distance(h1: str, h2: str) -> int:
     return sum(c1 != c2 for c1, c2 in zip(h1, h2))
 
 # ============================================================
-# VECTOR SEARCH & PURE PYTHON MATH (Idea #7 - WITHOUT NUMPY)
+# VECTOR SEARCH & PURE PYTHON MATH
 # ============================================================
 
 def sequence_similarity(a: str, b: str) -> float:
@@ -337,8 +341,8 @@ def sequence_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 def word_jaccard(a: str, b: str) -> float:
-    set_a = set(clean_gaming_text(a).split())
-    set_b = set(clean_gaming_text(b).split())
+    set_a = extract_entities(a)
+    set_b = extract_entities(b)
     if not set_a or not set_b:
         return 0.0
     return len(set_a & set_b) / len(set_a | set_b)
@@ -377,7 +381,7 @@ def batch_cosine_similarity(query_vector: List[float], vectors: List[List[float]
     return [cosine_similarity(query_vector, v) for v in vectors]
 
 # ============================================================
-# VISION AI FOR SHORT TEXT (Idea #5)
+# VISION AI FOR SHORT TEXT
 # ============================================================
 
 async def analyze_image_content(image_bytes: bytes) -> str:
@@ -407,7 +411,7 @@ async def analyze_image_content(image_bytes: bytes) -> str:
         return ""
 
 # ============================================================
-# FEW-SHOT PROMPTING AI JUDGE (Idea #6)
+# FEW-SHOT PROMPTING AI JUDGE
 # ============================================================
 
 async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
@@ -418,22 +422,18 @@ async def ai_compare(new_text: str, old_text: str) -> Optional[AIResult]:
 تو موتور هوشمند تشخیص اخبار تکراری رسانه گیمفا هستی.
 تکلیف: تشخیص بده آیا این دو خبر مربوط به یک موضوع/رویداد یکسان هستند یا خیر.
 
-قوانین و نمونه‌های یادگیری (Few-Shot Examples):
+دقت بسیار بالا:
+نام بازی یا فیلم موضوع اصلی را به دقت مقایسه کن. اگر دو خبر الگوی تیتر مشابهی دارند (مثلاً "مدت زمان فیلم مشخص شد") اما اسم فیلم یا بازی متفاوت است، به هیچ وجه تکراری نیستند.
 
 نمونه ۱ (تکراری - یک رویداد با کلمات متفاوت):
 خبر A: «تریلر جدید بازی Death Stranding 2 منتشر شد.»
 خبر B: «تماشا کنید: ویدیو و تریلر تازه از بازی دث استرندینگ ۲.»
 نتیجه: duplicate: true, same_event: true, explanation: "هر دو خبر مربوط به انتشار یک تریلر یکسان هستند."
 
-نمونه ۲ (غیرتکراری - یک بازی اما دو موضوع متفاوت):
-خبر A: «مشخصات سیستم مورد نیاز برای اجرای GTA 6 اعلام شد.»
-خبر B: «بازی GTA 6 با تاخیر مواجه شد و در سال ۲۰۲۶ عرضه می‌شود.»
-نتیجه: duplicate: false, same_event: false, explanation: "موضوع خبر اول مشخصات سیستم و خبر دوم تاخیر بازی است."
-
-نمونه ۳ (تکراری - پوشش تکمیلی / آپدیت):
-خبر A: «بازی کنسل شده Star Wars دوباره در دست ساخت قرار گرفت.»
-خبر B: «بروزرسانی: کارگردان Star Wars خبر ساخت مجدد بازی را تایید کرد.»
-نتیجه: duplicate: true, is_update: true, explanation: "خبر دوم پوشش تکمیلی و تاییدیه خبر اول است."
+نمونه ۲ (غیرتکراری - دو فیلم یا بازی متفاوت با تیتر مشابه):
+خبر A: «مدت زمان فیلم جدید الخاندرو گونسالس اینیاریتو مشخص شد.»
+خبر B: «مدت زمان فیلم Digger مشخص شد.»
+نتیجه: duplicate: false, same_event: false, explanation: "موضوع خبر اول فیلم اینیاریتو و خبر دوم فیلم Digger است."
 """
 
     user_prompt = f"""
@@ -519,7 +519,7 @@ def get_candidates_sync(new_text: str, new_embedding: Optional[List[float]]):
             if set(new_meta["events"]) & set(old_meta["events"]):
                 meta_boost = 0.15
 
-        ranking = ((effective_title * 0.40) + (semantic * 0.30) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
+        ranking = ((effective_title * 0.30) + (semantic * 0.40) + (ner_score * 0.20) + (lexical * 0.10)) + meta_boost
         candidates.append((ranking, semantic, lexical, ner_score, row))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -538,8 +538,8 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     cleaned = clean_gaming_text(text)
     fingerprint = sha256_hash(text)
     url = get_article_url(text)
-    title = extract_title(text)
 
+    # فقط بررسی‌های ۱۰۰٪ قطعی در فیلتر سریع انجام می‌شوند
     def fast_checks():
         with get_db() as conn:
             row = conn.execute("SELECT * FROM news WHERE sha256 = ? LIMIT 1", (fingerprint,)).fetchone()
@@ -558,23 +558,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
                     if dist <= 6:
                         return {"duplicate": True, "reason": "image_match", "confidence": 0.95, "row": r}
 
-            rows = conn.execute("SELECT * FROM news ORDER BY id DESC LIMIT ?", (ARCHIVE_SIZE,)).fetchall()
-            clean_t = clean_gaming_text(title)
-
-            if clean_t:
-                for r in rows:
-                    old_title = clean_gaming_text(r["title"] or "")
-                    if old_title:
-                        seq_sim = SequenceMatcher(None, clean_t, old_title).ratio()
-                        token_sim = token_overlap_ratio(title, r["title"] or "")
-                        if seq_sim >= 0.80 or token_sim >= 0.60:
-                            return {
-                                "duplicate": True,
-                                "reason": "fuzzy_title_match",
-                                "confidence": max(seq_sim, token_sim),
-                                "row": r
-                            }
-
         return None
 
     quick_res = await asyncio.to_thread(fast_checks)
@@ -588,7 +571,7 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
     candidate_meta = []
 
     for ranking, semantic, lexical, ner_score, row in candidates:
-        if ranking < 0.20 and ner_score < 0.35:
+        if ranking < 0.15:
             continue
         tasks.append(ai_compare(text, row["text"]))
         candidate_meta.append((row, semantic, lexical, ranking))
@@ -618,16 +601,6 @@ async def check_duplicate(text: str, image_hash: Optional[str] = None, image_byt
                 
             if result.duplicate and conf >= 0.60:
                 return {"duplicate": True, "reason": "ai_ambiguous", "confidence": conf, "row": row, "explanation": result.explanation}
-
-    if candidates:
-        top_ranking, top_semantic, top_lexical, top_ner, top_row = candidates[0]
-        if top_ner >= 0.65 or (top_lexical >= 0.50 and top_ner >= 0.50):
-            return {
-                "duplicate": True,
-                "reason": "algorithmic_fallback",
-                "confidence": max(top_ner, top_lexical),
-                "row": top_row
-            }
 
     return {"duplicate": False, "reason": "new_news", "confidence": 0.0, "row": None}
 
@@ -776,10 +749,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if reason in ["exact_hash", "exact_url", "near_exact_text", "title_exact_match"]:
                 await status.edit_text(f"♻️ *خبر کاملاً تکراری است* (اطمینان ۱۰۰٪){old_preview}\n\n⛔ خبر ذخیره نشد.", parse_mode="Markdown")
-                return
-
-            elif reason in ["fuzzy_title_match", "algorithmic_fallback"]:
-                await status.edit_text(f"♻️ *خبر تکراری است* (شباهت کلمات/موضوع: {conf:.1f}%){old_preview}\n\n⛔ خبر ذخیره نشد.", parse_mode="Markdown")
                 return
 
             elif reason == "image_match":
